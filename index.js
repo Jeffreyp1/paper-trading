@@ -5,6 +5,7 @@ const PORT = 3000
 const loginRoute = require('./routes/login')
 const tradeRoute = require('./routes/trade')
 const portfolioRoute = require('./routes/portfolio')
+const holdingsRoute = require('./routes/holdings.js')
 require('dotenv').config();
 
 const bcrypt = require('bcrypt');
@@ -13,6 +14,7 @@ app.use(express.json())
 app.use('/routes', loginRoute)
 app.use('/routes', tradeRoute)
 app.use('/routes', portfolioRoute)
+app.use('/routes', holdingsRoute)
 app.get('/', (req,res)=>{
     res.send("Home")
 })
@@ -30,18 +32,22 @@ pool.query('SELECT NOW()', (err, res)=>{
 })
 
 app.post('/register', async (req, res) => {
-    const { username, password } = req.body;
+    const { email, password } = req.body;
     const initialBalance = 10000;
 
     try {
+        const exisitingUser = await pool.query("Select * FROM users WHERE email = $1",[email])
+        if (exisitingUser.rowCount>0){
+          return res.status(400).json({error:"Email already in use"})
+        }
         const hashedPassword = await bcrypt.hash(password, 10); // ✅ Hash the password
 
         const result = await pool.query(
-            'INSERT INTO users (username, password, balance) VALUES ($1, $2, $3) RETURNING *',
-            [username, hashedPassword, initialBalance]
+            'INSERT INTO users (email, password_hash, balance) VALUES ($1, $2, $3) RETURNING *',
+            [email, hashedPassword, initialBalance]
         );
 
-        res.status(201).json(result.rows[0]);
+        res.status(201).json({success: true, user: result.rows[0]});
     } catch (err) {
         console.error(err);
         res.status(500).send('Error registering user');

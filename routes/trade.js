@@ -1,14 +1,16 @@
 const express = require('express');
 const pool = require('../db')
 const axios = require('axios');
+const authenticateToken = require('../middleware/authMiddleware');
 require('dotenv').config()
 
 const router = express.Router();
 const STOCK_API_KEY = process.env.STOCK_API_KEY;
 
-router.post('/trade', async (req,res)=>{
-    const {userId, stockSymbol, quantity, action} = req.body
-    if (!userId || !stockSymbol || !quantity || !action){
+router.post('/trade', authenticateToken, async (req,res)=>{
+    const {symbol, quantity, action} = req.body
+    const userId = req.user.id
+    if (!symbol || !quantity || !action){
         return res.status(400).json({error: "Missing required fields"})
     }
     if (!['buy','sell'].includes(action.toLowerCase())){
@@ -18,12 +20,16 @@ router.post('/trade', async (req,res)=>{
         const stockData = await axios.get(`https://www.alphavantage.co/query`,{
             params:{
                 function: "GLOBAL_QUOTE",
-                symbol: stockSymbol,
+                symbol: symbol,
                 apikey: STOCK_API_KEY
             },
             timeout: 5000
         })
-        const price = parseFloat(stockData.data["Global Quote"]["05. price"])
+        const stockQuote = stockData.data["Global Quote"];
+        if (!stockQuote || !stockQuote["05. price"] || isNaN(parseFloat(stockQuote["05. price"]))){
+            return res.status(500).json({error: "Failed to retrieve stock price"})
+        }
+        const price = parseFloat(stockQuote["05. price"])
         if (!price || isNaN(price)){
             return res.status(500).json({error:"Failed to retrieve stock price"})
         }
@@ -41,12 +47,17 @@ router.post('/trade', async (req,res)=>{
             }
             await pool.query("Update USERS SET balance = balance - $1 WHERE id = $2",[totalCost, userId]);
             await pool.query(
-                "Insert INTO trades (user_id, stock_symbol, quantity, price, trade_type) VALUES ($1, $2,$3,$4, 'buy')",[userId, stockSymbol, quantity,price]
+                "Insert INTO trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1, $2,$3,$4, 'BUY')",[userId, symbol, quantity,price]
             )
         }else if (action.toLowerCase() === 'sell'){
             const holdings = await pool.query(
-                "SELECT SUM(quantity) as total_shares FROM trades WHERE user_id = $1 AND stock_symbol = $2",[userId, stockSymbol]
-            )
+                `SELECT 
+                    COALESCE(SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE 0 END), 0) -
+                    COALESCE(SUM(CASE WHEN trade_type = 'SELL' THEN quantity ELSE 0 END), 0) 
+                AS total_shares
+                FROM trades WHERE user_id = $1 AND symbol = $2`,
+                [userId, symbol]
+            );
             let totalShares = parseInt(holdings.rows[0].total_shares) || 0;
             if (totalShares < quantity){
                 return res.status(400).json({error:"Not enough shares"});
@@ -54,7 +65,7 @@ router.post('/trade', async (req,res)=>{
 
             await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2",[totalCost, userId])
             await pool.query(
-                "INSERT into trades (user_id, stock_symbol, quantity, price, trade_type) VALUES ($1,$2,$3,$4, 'sell')",[userId, stockSymbol, quantity, price]
+                "INSERT into trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1,$2,$3,$4, 'SELL')",[userId, symbol, quantity, price]
             )
 
         }  
