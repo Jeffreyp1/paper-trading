@@ -4,8 +4,9 @@ const app = express()
 const PORT = 3000
 const loginRoute = require('./routes/login')
 const tradeRoute = require('./routes/trade')
-const portfolioRoute = require('./routes/portfolio')
+const tradeHistoryRoute = require('./routes/trade_history')
 const holdingsRoute = require('./routes/holdings.js')
+const leaderboardRoute = require('./routes/leaderboard.js')
 require('dotenv').config();
 
 const bcrypt = require('bcrypt');
@@ -13,8 +14,9 @@ const bcrypt = require('bcrypt');
 app.use(express.json())
 app.use('/routes', loginRoute)
 app.use('/routes', tradeRoute)
-app.use('/routes', portfolioRoute)
+app.use('/routes', tradeHistoryRoute)
 app.use('/routes', holdingsRoute)
+app.use('/routes', leaderboardRoute)
 app.get('/', (req,res)=>{
     res.send("Home")
 })
@@ -32,7 +34,7 @@ pool.query('SELECT NOW()', (err, res)=>{
 })
 
 app.post('/register', async (req, res) => {
-    const { email, password } = req.body;
+    const { email, password, username} = req.body;
     const initialBalance = 10000;
 
     try {
@@ -43,8 +45,8 @@ app.post('/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10); // ✅ Hash the password
 
         const result = await pool.query(
-            'INSERT INTO users (email, password_hash, balance) VALUES ($1, $2, $3) RETURNING *',
-            [email, hashedPassword, initialBalance]
+            'INSERT INTO users (email, password_hash, balance, username) VALUES ($1, $2, $3,$4) RETURNING *',
+            [email, hashedPassword, initialBalance,username]
         );
 
         res.status(201).json({success: true, user: result.rows[0]});

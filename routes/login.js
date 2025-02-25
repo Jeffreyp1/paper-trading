@@ -26,7 +26,7 @@ router.post('/login', async(req,res)=>{
         const token = jwt.sign(
             {id: user.id, email: user.email},
             SECRET_KEY,
-            {expiresIn: "1h"}
+            {expiresIn: "24h"}
         )
         res.status(200).json({token, email: user.email, balance: user.balance})
     }
