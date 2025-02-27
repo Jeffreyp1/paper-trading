@@ -1,7 +1,7 @@
 const express = require('express');
-const pool = require('../db')
+const pool = require('../../../db')
 const axios = require('axios');
-const authenticateToken = require('../middleware/authMiddleware');
+const authenticateToken = require('../../../middleware/authMiddleware');
 require('dotenv').config()
 
 const router = express.Router();
@@ -34,7 +34,6 @@ router.get('/holdings', authenticateToken, async(req,res)=>{
         }
         let totalPortfolio = 0;
         return res.status(200).json({message: "Query Successful", data: holdingsResult.rows})
-        // console.log(holdingsResult)
 
     }catch(error){
         return res.status(400).json({error:"Error occurred"})
