@@ -1,6 +1,8 @@
 // db.js
-const { Pool } = require('pg');
-require('dotenv').config();
+import pkg from 'pg';
+import 'dotenv/config';
+
+const {Pool} = pkg
 
 const pool = new Pool({
   user: process.env.DB_USER, // Username for the database
@@ -10,4 +12,4 @@ const pool = new Pool({
   port: process.env.DB_PORT, // Database port, usually 5432
 });
 
-module.exports = pool; // Export the pool object
+export default pool; // Export the pool object

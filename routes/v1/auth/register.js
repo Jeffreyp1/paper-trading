@@ -1,9 +1,10 @@
-const express = require('express')
-const pool = require('../../../db')
-const bcrypt = require('bcrypt')
-const router = express.Router()
-const app = express()
-app.post('/register', async (req, res) => {
+import express from 'express';
+import pool from '../../../db.js';
+import bcrypt from 'bcrypt';
+
+const router = express.Router();
+const app = express();
+router.post('/register', async (req, res) => {
     const { email, password, username} = req.body;
     const initialBalance = 10000;
 
@@ -26,4 +27,4 @@ app.post('/register', async (req, res) => {
     }
 });
 
-module.exports = router;
+export default router;

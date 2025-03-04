@@ -1,12 +1,12 @@
-const express = require('express');
-const pool = require('../../../db')
-const axios = require('axios');
-const authenticateToken = require('../../../middleware/authMiddleware');
+import express from 'express';
+import pool from '../../../db.js';
+import redis from '../../../redis.js';
 
-require('dotenv').config()
+import axios from 'axios';
+import authenticateToken from '../../../middleware/authMiddleware.js';
+import 'dotenv/config';
 
 const router = express.Router();
-const STOCK_API_KEY = process.env.STOCK_API_KEY;
 router.get('/trade_history', authenticateToken, async (req,res)=>{
     if (!req.user || !req.user.id){
         return res.status(401).json({error: "Unauthorized."})
@@ -34,4 +34,4 @@ router.get('/trade_history', authenticateToken, async (req,res)=>{
         res.status(500).json({error:"Error retrieving portfolio",details: error.message})
     }
 })
-module.exports = router;
+export default router;

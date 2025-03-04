@@ -1,8 +1,9 @@
-const express = require('express');
-const pool = require('../../../db');
-const bcrypt = require('bcrypt')
-const jwt = require('jsonwebtoken')
-require('dotenv').config();
+import express from 'express';
+import pool from '../../../db.js';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+
+import 'dotenv/config';
 
 const router = express.Router()
 const SECRET_KEY = process.env.JWT_SECRET
@@ -35,4 +36,4 @@ router.post('/login', async(req,res)=>{
         res.status(500).send('Error logging in');
     }
 })
-module.exports = router;
+export default router;

@@ -1,13 +1,15 @@
-const express = require('express');
-const pool = require('../../../db')
-const axios = require('axios');
-const authenticateToken = require('../../../middleware/authMiddleware');
-require('dotenv').config()
+import express from 'express';
+import pool from '../../../db.js';
+import redis from '../../../redis.js';
+
+import axios from 'axios';
+import authenticateToken from '../../../middleware/authMiddleware.js';
+import getStockPrice from '../../../services/getStockPrice.js';
+import 'dotenv/config';
 
 const router = express.Router();
-const STOCK_API_KEY = process.env.STOCK_API_KEY;
-
 router.post('/trade', authenticateToken, async (req,res)=>{
+    const start = Date.now();
     const {symbol, quantity, action} = req.body
     const userId = req.user.id
     if (!symbol || !quantity || !action){
@@ -16,41 +18,33 @@ router.post('/trade', authenticateToken, async (req,res)=>{
     if (!['buy','sell'].includes(action.toLowerCase())){
         return res.status(400).json({error: "Action must be to buy or sell"})
     }
-    try{
-        const stockData = await axios.get(`https://www.alphavantage.co/query`,{
-            params:{
-                function: "GLOBAL_QUOTE",
-                symbol: symbol,
-                apikey: STOCK_API_KEY
-            },
-            timeout: 5000
-        })
-        const stockQuote = stockData.data["Global Quote"];
-        if (!stockQuote || !stockQuote["05. price"] || isNaN(parseFloat(stockQuote["05. price"]))){
-            return res.status(500).json({error: "Failed to retrieve stock price"})
-        }
-        const price = parseFloat(stockQuote["05. price"])
-        if (!price || isNaN(price)){
-            return res.status(500).json({error:"Failed to retrieve stock price"})
-        }
+    const client = await pool.connect()
 
-        const userResult = await pool.query("SELECT balance from users WHERE id = $1", [userId])
+    try{
+        await client.query("BEGIN");
+
+        const userResult = await client.query("SELECT balance from users WHERE id = $1", [userId])
         if (userResult.rows.length === 0){
             return res.status(404).json({error:"User not found"})
         }
         
         let balance = parseFloat(userResult.rows[0].balance)
-        let totalCost = quantity * price
+        let stockPrice = await getStockPrice(symbol)
+        if (!stockPrice){
+            return res.status(400).json({Error:"Error getting stock price from cache"})
+        }
+        let totalCost = quantity * parseFloat(stockPrice)
         if (action.toLowerCase() === "buy"){
             if (balance < totalCost){
+                await client.query("ROLLBACK")
                 return res.status(400).json({error:"Insufficient funds"})
             }
-            await pool.query("Update USERS SET balance = balance - $1 WHERE id = $2",[totalCost, userId]);
-            await pool.query(
-                "Insert INTO trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1, $2,$3,$4, 'BUY')",[userId, symbol, quantity,price]
+            await client.query("Update USERS SET balance = balance - $1 WHERE id = $2",[totalCost, userId]);
+            await client.query(
+                "Insert INTO trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1, $2,$3,$4, 'BUY')",[userId, symbol, quantity,stockPrice]
             )
         }else if (action.toLowerCase() === 'sell'){
-            const holdings = await pool.query(
+            const holdings = await client.query(
                 `SELECT 
                     COALESCE(SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE 0 END), 0) -
                     COALESCE(SUM(CASE WHEN trade_type = 'SELL' THEN quantity ELSE 0 END), 0) 
@@ -63,19 +57,26 @@ router.post('/trade', authenticateToken, async (req,res)=>{
                 return res.status(400).json({error:"Not enough shares"});
             }
 
-            await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2",[totalCost, userId])
-            await pool.query(
-                "INSERT into trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1,$2,$3,$4, 'SELL')",[userId, symbol, quantity, price]
+            await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2",[totalCost, userId])
+            await client.query(
+                "INSERT into trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1,$2,$3,$4, 'SELL')",[userId, symbol, quantity, stockPrice]
             )
 
         }  
+        await client.query("COMMIT")
+        const end = Date.now();
+        console.log(` Portfolio API Response Time: ${end - start}ms`);
         return res.status(200).json({message: "Trade Successful!"})
 
 
     }catch(error){
+        await client.query("ROLLBACK")
         console.error("Trade Error: ", error.message)
         res.status(500).json({error: "Trade processing error", details: error.message})
     }
+    finally{
+        client.release()
+    }
 })
 
-module.exports = router;
+export default router;

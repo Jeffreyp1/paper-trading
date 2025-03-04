@@ -1,20 +1,69 @@
-const express = require('express')
-const pool = require('./db')
+import express from "express";
+import redis from "./redis.js";
+import authenticateToken from './middleware/authMiddleware.js'; 
+import fetchStockPrices  from "./services/stockService.js";
 const app = express()
 const PORT = 3000
-const bcrypt = require('bcrypt');
-const authenticateToken = require('./middleware/authMiddleware');
+// const bcrypt = require('bcrypt');
+// const authenticateToken = require('./middleware/authMiddleware');
 
-const routes = require('./routes/v1');
+import routes from "./routes/v1/index.js"
 
 app.use(express.json());
 
 // Use centralized routes
 app.use('/api/v1', routes);
-require('dotenv').config();
 
 
 app.use(express.json())
+
+// async function updateStockPrices(){
+//   const prices = await fetchStockPrices()
+//   if (!prices){
+//     return;
+//   }
+//   const commands = [];
+//   for (const [symbol, price] of Object.entries(prices)) {
+//       commands.push(["SET", symbol, price, "EX", 3600]); // Format for Redis
+//   }
+
+//   try {
+//     await redis.sendCommand(["MULTI"]); // ✅ Start transaction
+//     for (const command of commands) {
+//         await redis.sendCommand(command); // ✅ Batch insert stocks
+//     }
+//     await redis.sendCommand(["EXEC"]); // ✅ Execute transaction
+
+//     console.log(`✅ Updated ${Object.keys(prices).length} stocks at ${new Date().toLocaleTimeString()}`);
+//   } catch (error) {
+//       console.error(" Redis Batch Update Error:", error);
+//   }
+// }
+async function updateStockPrices() {
+  console.log("🔄 Fetching stock prices...");
+
+  const prices = await fetchStockPrices();
+  if (!prices) {
+      console.log("❌ No prices fetched.");
+      return;
+  }
+
+  const multi = redis.multi(); // ✅ Start a Redis transaction
+
+  for (const [symbol, price] of Object.entries(prices)) {
+      multi.set(symbol, price, "EX", 3600); // ✅ Batch update with expiration
+  }
+
+  try {
+      await multi.exec(); // ✅ Execute batch update
+      console.log(`✅ Updated ${Object.keys(prices).length} stocks at ${new Date().toLocaleTimeString()}`);
+  } catch (error) {
+      console.error("❌ Redis Batch Update Error:", error);
+  }
+}
+
+updateStockPrices();
+setInterval(updateStockPrices, 360000); 
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`)

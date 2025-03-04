@@ -1,12 +1,14 @@
-const express = require('express');
-const pool = require('../../../db')
-const axios = require('axios');
-const authenticateToken = require('../../../middleware/authMiddleware');
-require('dotenv').config()
+import express from 'express';
+import pool from '../../../db.js';
+import redis from '../../../redis.js';
+
+import axios from 'axios';
+import authenticateToken from '../../../middleware/authMiddleware.js';
+import 'dotenv/config';
 
 const router = express.Router();
-const STOCK_API_KEY = process.env.STOCK_API_KEY;
 router.get('/holdings', authenticateToken, async(req,res)=>{
+    const start = Date.now();
     if (!req.user || !req.user.id){
         return res.status(401).json({error: "Unauthorized."})
     }
@@ -33,10 +35,12 @@ router.get('/holdings', authenticateToken, async(req,res)=>{
             return res.status(404).json({error:"No holdings found", holdings: []})
         }
         let totalPortfolio = 0;
+        const end = Date.now();
+        console.log(` Portfolio API Response Time: ${end - start}ms`);
         return res.status(200).json({message: "Query Successful", data: holdingsResult.rows})
 
     }catch(error){
         return res.status(400).json({error:"Error occurred"})
     }
 })
-module.exports = router;
+export default router;

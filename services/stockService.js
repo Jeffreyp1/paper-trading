@@ -1,0 +1,35 @@
+import axios from "axios";
+import "dotenv/config";
+
+const STOCK_API_KEY = process.env.STOCK_API_KEY
+const STOCKS = [
+    "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "BRK.B", "JNJ", "V", "PG",
+    "NVDA", "UNH", "HD", "MA", "DIS", "BAC", "VZ", "ADBE", "CMCSA", "NFLX",
+    "PFE", "T", "KO", "NKE", "MRK", "INTC", "CSCO", "XOM", "CVX", "ABT",
+    "ORCL", "CRM", "PEP", "IBM", "MCD", "WFC", "QCOM", "UPS", "COST", "MDT",
+    "CAT", "HON", "AMGN", "LLY", "PM", "BLK", "GE", "BA", "SBUX", "MMM",
+    "F", "GM", "ADP", "SPGI", "RTX", "TMO", "NOW", "BKNG", "MO", "ZTS",
+    "COP", "AXP", "SCHW", "CVS", "LOW", "DE", "MET", "PNC", "GS", "CI",
+    "TJX", "ICE", "PLD", "DUK", "SO", "ED", "OXY", "FDX", "MMC", "EXC",
+    "EQIX", "SLB", "GD", "APD", "NEE", "EOG", "LMT", "USB", "HCA", "BK",
+    "ITW", "AEP", "ECL", "PGR", "CSX", "CB", "MS", "TRV", "AON", "VLO"
+];
+
+export default async function fetchStockPrices(){
+    try{
+        const url = `https://financialmodelingprep.com/api/v3/quote/${STOCKS.join(",")}?apikey=${STOCK_API_KEY}`;
+        const response = await axios.get(url)
+
+        if (!response.data || response.data.length === 0) throw new error("No stock data received.")
+
+        return response.data.reduce((prices,stock) =>{
+            prices[stock.symbol] = stock.price
+            return prices;
+        }, {})
+
+    }
+    catch(error){
+        console.error("Stock Price Fetch Error:", error.message);
+        return null;
+    }
+}
