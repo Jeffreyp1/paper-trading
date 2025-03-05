@@ -8,7 +8,44 @@ import getStockPrice from '../../../services/getStockPrice.js';
 import 'dotenv/config';
 
 const router = express.Router();
-router.post('/trade', authenticateToken, async (req,res)=>{
+async function executeBuy(client, balance, totalCost, userId, symbol, quantity, stockPrice){
+    if (balance < totalCost){
+        await client.query("ROLLBACK")
+        return res.status(400).json({error:"Insufficient funds"})
+    }
+    await client.query("Update USERS SET balance = balance - $1 WHERE id = $2",[totalCost, userId]);
+    await client.query(
+        `Insert INTO trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1, $2,$3,$4, 'BUY')
+        `,[userId, symbol, quantity,stockPrice]
+    )
+    await client.query(
+        `Insert INTO positions (user_id, symbol, quantity, average_price) VALUES ($1, $2,$3,$4) 
+        ON CONFLICT(user_id, symbol) 
+        DO UPDATE SET
+            quantity = positions.quantity + EXCLUDED.quantity,
+            average_price = ((positions.quantity * positions.average_price) + (EXCLUDED.quantity * EXCLUDED.average_price))/ (positions.quantity + EXCLUDED.quantity),
+            updated_at = CURRENT_TIMESTAMP;
+        `,[userId, symbol, quantity, stockPrice]
+    )
+}
+async function executeSell(client, userId, symbol, quantity, stockPrice){
+    const holding = await client.query(
+            `UPDATE positions
+            SET quantity = quantity - $1, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = $2 AND symbol = $3 and quantity >= $1
+            RETURNING *;
+            `[quantity, userId, symbol])
+        if (holding.rowCount === 0){
+            await client.query("ROLLBACK")
+            return res.status(400).json({error:"Not enough shares"});
+        }
+        await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2",[totalCost, userId])
+        await client.query(
+            `INSERT into trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1,$2,$3,$4, 'SELL')
+            `,[userId, symbol, quantity, stockPrice]
+    )
+}
+router.post('/trade', authenticateToken,async (req,res)=>{
     const start = Date.now();
     const {symbol, quantity, action} = req.body
     const userId = req.user.id
@@ -27,7 +64,6 @@ router.post('/trade', authenticateToken, async (req,res)=>{
         if (userResult.rows.length === 0){
             return res.status(404).json({error:"User not found"})
         }
-        
         let balance = parseFloat(userResult.rows[0].balance)
         let stockPrice = await getStockPrice(symbol)
         if (!stockPrice){
@@ -35,33 +71,9 @@ router.post('/trade', authenticateToken, async (req,res)=>{
         }
         let totalCost = quantity * parseFloat(stockPrice)
         if (action.toLowerCase() === "buy"){
-            if (balance < totalCost){
-                await client.query("ROLLBACK")
-                return res.status(400).json({error:"Insufficient funds"})
-            }
-            await client.query("Update USERS SET balance = balance - $1 WHERE id = $2",[totalCost, userId]);
-            await client.query(
-                "Insert INTO trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1, $2,$3,$4, 'BUY')",[userId, symbol, quantity,stockPrice]
-            )
+            await executeBuy(client, balance, totalCost, userId, symbol, quantity, stockPrice)
         }else if (action.toLowerCase() === 'sell'){
-            const holdings = await client.query(
-                `SELECT 
-                    COALESCE(SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE 0 END), 0) -
-                    COALESCE(SUM(CASE WHEN trade_type = 'SELL' THEN quantity ELSE 0 END), 0) 
-                AS total_shares
-                FROM trades WHERE user_id = $1 AND symbol = $2`,
-                [userId, symbol]
-            );
-            let totalShares = parseInt(holdings.rows[0].total_shares) || 0;
-            if (totalShares < quantity){
-                return res.status(400).json({error:"Not enough shares"});
-            }
-
-            await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2",[totalCost, userId])
-            await client.query(
-                "INSERT into trades (user_id, symbol, quantity, executed_price, trade_type) VALUES ($1,$2,$3,$4, 'SELL')",[userId, symbol, quantity, stockPrice]
-            )
-
+            await executeSell(client, userId, symbol, quantity, stockPrice)
         }  
         await client.query("COMMIT")
         const end = Date.now();

@@ -18,16 +18,25 @@ router.get('/holdings', authenticateToken, async(req,res)=>{
 
     }
     try{
+        // const holdingsQuery = `
+        //     SELECT 
+        //         symbol,
+        //         SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE -quantity END) AS quantity_owned,
+        //         SUM(CASE WHEN trade_type = 'BUY' THEN quantity * executed_price ELSE 0 END) /
+        //         NULLIF(SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE 0 END), 0) AS avg_buy_price
+        //     FROM trades 
+        //     WHERE user_id = $1
+        //     GROUP BY symbol
+        //     HAVING SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE -quantity END) > 0;
+        // `;
+        
         const holdingsQuery = `
-            SELECT 
+            SELECT
                 symbol,
-                SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE -quantity END) AS quantity_owned,
-                SUM(CASE WHEN trade_type = 'BUY' THEN quantity * executed_price ELSE 0 END) /
-                NULLIF(SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE 0 END), 0) AS avg_buy_price
-            FROM trades 
+                quantity,
+                average_price
+            FROM positions
             WHERE user_id = $1
-            GROUP BY symbol
-            HAVING SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE -quantity END) > 0;
         `;
         const holdingsResult = await pool.query(holdingsQuery,[userId]);
         console.log(holdingsResult)

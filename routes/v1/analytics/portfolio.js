@@ -9,7 +9,6 @@ import getStockPrice from '../../../services/getStockPrice.js';
 import 'dotenv/config';
 
 const router = express.Router();
-const STOCK_API_KEY = process.env.STOCK_API_KEY;
 router.get('/portfolio', authenticateToken, async (req,res)=>{
     const start = Date.now();
     if (!req.user || !req.user.id){
@@ -26,16 +25,13 @@ router.get('/portfolio', authenticateToken, async (req,res)=>{
         WHERE id = $1
         `,[userId])
         const holdingsQuery = `
-        SELECT 
-            symbol,
-            SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE -quantity END) AS quantity_owned,
-            SUM(CASE WHEN trade_type = 'BUY' THEN quantity * executed_price ELSE 0 END) /
-            NULLIF(SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE 0 END), 0) AS avg_buy_price
-        FROM trades 
-        WHERE user_id = $1
-        GROUP BY symbol
-        HAVING SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE -quantity END) > 0;
-    `;
+            SELECT
+                symbol, 
+                quantity,
+                average_price
+            FROM positions
+            WHERE user_id = $1
+        `
         const holdingsResult = await pool.query(holdingsQuery,[userId]);
         let total_investment = parseFloat(balance.rows[0].balance)
         let current_value = parseFloat(balance.rows[0].balance)
