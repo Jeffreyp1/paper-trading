@@ -1,0 +1,75 @@
+import {WebSocketServer} from "ws";
+import redis from './redis.js'
+const wss = new WebSocketServer({port: 8080})
+
+wss.on('connection', async (ws)=>{
+  console.log("New WebSocket Connection");
+  ws.send(JSON.stringify({message: "Connected to live updates"}));
+    const start = Date.now();
+    const redisData = await redis.zRangeWithScores("leaderboard", -10, -1); // Get last 10 (highest scores)
+    const formattedLeaderboard = redisData.reverse().map(entry => {
+        const userData = JSON.parse(entry.value);
+        return{
+            username: userData.username,
+            net_worth: entry.score,
+            holdings: userData.holdings
+        };
+    });
+
+    const end = Date.now();
+    console.log(`leaderboard API Response Time: ${end - start}ms`);
+    ws.send(JSON.stringify({type:"ledaerboard", data: formattedLeaderboard}))
+    ws.on("close", ()=>{
+        console.log("User disconnected")
+    })
+    
+})
+
+export async function pushLeaderboard(){
+    const redisData = await redis.zRangeWithScores("leaderboard", -10, -1); // Get last 10 (highest scores)
+
+    // console.log(redisData)
+
+    // const redisData = await redis.zRangeWithScores("leaderboard", 0, 9, { rev: true });
+    // console.log("📌 Sorted Leaderboard BEFORE Redis Insert:", redisData.map(u => ({ username: u.username, net_worth: u.net_worth })));
+    if (redisData.length === 0) {
+
+    }
+  
+    const formattedLeaderboard = redisData.reverse().map(entry => {
+        const userData = JSON.parse(entry.value);
+        return{
+            username: userData.username,
+            net_worth: entry.score,
+            holdings: userData.holdings
+        };
+    });
+    console.log(formattedLeaderboard)
+    wss.clients.forEach(client=>{
+        if (client.readyState === 1){
+            client.send(JSON.stringify({type:"leaderboard", data: formattedLeaderboard}))
+        }
+    })
+    console.log("Leaderboard update sent to WebSocket Clients")
+}
+// export function pushStockPrices(){
+
+//     redisData.forEach(data=>{
+//         wss.clients.forEach(client=>{
+//             if (client.readyState === 1){
+//                 client.send(JSON.stringify({type:"stocks", data: data}))
+//             }
+//         })
+//         console.log("Stock Prices update sent to WebSocket")
+//     })
+// }
+export function pushStockPrices(){
+    redis.hGetAll("stockPrices").then(stockData=>{
+        wss.client.forEach(client =>{
+            if(client.readyState === 1){
+                client.send(JSON.stringify({type:"stocks", data: stockData}))
+            }
+        })
+    })
+}
+export default wss

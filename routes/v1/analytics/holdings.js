@@ -18,18 +18,6 @@ router.get('/holdings', authenticateToken, async(req,res)=>{
 
     }
     try{
-        // const holdingsQuery = `
-        //     SELECT 
-        //         symbol,
-        //         SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE -quantity END) AS quantity_owned,
-        //         SUM(CASE WHEN trade_type = 'BUY' THEN quantity * executed_price ELSE 0 END) /
-        //         NULLIF(SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE 0 END), 0) AS avg_buy_price
-        //     FROM trades 
-        //     WHERE user_id = $1
-        //     GROUP BY symbol
-        //     HAVING SUM(CASE WHEN trade_type = 'BUY' THEN quantity ELSE -quantity END) > 0;
-        // `;
-        
         const holdingsQuery = `
             SELECT
                 symbol,
@@ -43,11 +31,9 @@ router.get('/holdings', authenticateToken, async(req,res)=>{
         if(holdingsResult.rows.length === 0){
             return res.status(404).json({error:"No holdings found", holdings: []})
         }
-        let totalPortfolio = 0;
         const end = Date.now();
         console.log(` Portfolio API Response Time: ${end - start}ms`);
         return res.status(200).json({message: "Query Successful", data: holdingsResult.rows})
-
     }catch(error){
         return res.status(400).json({error:"Error occurred"})
     }

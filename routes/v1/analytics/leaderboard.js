@@ -1,11 +1,8 @@
 import express from 'express';
-import pool from '../../../db.js';
 import redis from '../../../redis.js';
-import axios from 'axios';
 import authenticateToken from '../../../middleware/authMiddleware.js';
 import 'dotenv/config';
-import getStockPrice from '../../../services/getStockPrice.js';
-import { stringify } from 'postcss';
+import wss from '../../../wsServer.js'
 
 const router = express.Router();
 router.get('/leaderboard', authenticateToken, async (req,res)=>{
