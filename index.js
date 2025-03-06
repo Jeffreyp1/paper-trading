@@ -1,6 +1,5 @@
 import express from "express";
 import redis from "./redis.js";
-import authenticateToken from './middleware/authMiddleware.js'; 
 import pool from "./db.js"
 import fetchStockPrices  from "./services/stockService.js";
 import {pushLeaderboard} from "./wsServer.js"
@@ -36,10 +35,13 @@ async function updateStockPrices() {
 }
 async function updateLeaderboard() {
   try {
-    const start = Date.now()
-      const users = await pool.query(`
-      SELECT users.id, users.username, users.balance
-      FROM users
+      const start = Date.now()
+      const client = await pool.connect()
+      const users = await client.query(`
+      SELECT DISTINCT ON(u.id) u.id, u.username, u.balance, p.symbol, p.quantity
+      FROM users u
+      JOIN positions p 
+      ON u.id = p.user_id
       `);
       let userMap = new Map();
       for (const user of users.rows) {
@@ -52,11 +54,11 @@ async function updateLeaderboard() {
           });
       }
       const stockData = redis.hGetAll("stockPrices")
-      const holdings = await pool.query(`SELECT user_id, symbol, quantity FROM positions`);
-      for (const stock of holdings.rows) {
+      // const holdings = await client.query(`SELECT user_id, symbol, quantity FROM positions`);
+      for (const stock of users.rows) {
         const stockPrice = stockData[stock.symbol] || 0;
         const totalValue = stockPrice * (stock.quantity || 0);
-        let userEntry = userMap.get(stock.user_id);
+        let userEntry = userMap.get(stock.id);
         userEntry.holdings.push({
             symbol: stock.symbol,
             quantity: stock.quantity || 0,
@@ -104,8 +106,8 @@ await updateLeaderboard();
 setInterval(async()=>{
   await updateLeaderboard();
 }, 360000);
-// await updateStockPrices();
-// setInterval(updateStockPrices, 360000); 
+await updateStockPrices();
+setInterval(updateStockPrices, 360000); 
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`)

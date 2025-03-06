@@ -2,7 +2,8 @@ import { faker } from "@faker-js/faker";
 import pg from "pg";
 import bcrypt from "bcrypt";
 import 'dotenv/config';
-import redis from "./redis.js"; // Ensure your Redis connection is correct
+import redis from "./redis.js";
+import { pushLeaderboard } from "./wsServer.js"; // Import leaderboard update function
 
 const pool = new pg.Pool({
     user: process.env.DB_USER,
@@ -12,32 +13,34 @@ const pool = new pg.Pool({
     port: process.env.DB_PORT,
 });
 
-// List of stock symbols
-const STOCK_SYMBOLS = ["AAPL", "GOOGL", "MSFT", "TSLA", "AMZN", "META", "NFLX", "NVDA", "IBM", "AMD"];
+// Stock Symbols for Randomized Trades
+const STOCK_SYMBOLS = [
+    "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "BRK.B", "JNJ", "V", "PG"
+];
 
-// Metrics Tracking
+// **Metrics**
 let totalUsers = 0;
 let totalTrades = 0;
-let totalPositionsChecked = 0;
+let totalPositionsUpdated = 0;
 
 // ==============================
 // 1️⃣ Main Test Function
 // ==============================
-async function testDatabase(times = 500) {
+async function testDatabase(times = 9000) {
     const start = Date.now();
 
     for (let i = 0; i < times; i++) {
         const userId = await testUsers();
         if (userId) {
             await testTrades(userId);
-            await testPositions(userId);
+            await updatePositions(userId);
         }
     }
 
-    await testLeaderboard();
+    await testLeaderboard(); // Leaderboard updates after all trades
     const end = Date.now();
 
-    console.log(`✅ Added ${totalUsers} users, ${totalTrades} trades, and checked ${totalPositionsChecked} positions.`);
+    console.log(`✅ Added ${totalUsers} users, ${totalTrades} trades, updated ${totalPositionsUpdated} positions.`);
     console.log(`🏁 Test completed in ${end - start}ms.`);
     process.exit();
 }
@@ -45,19 +48,22 @@ async function testDatabase(times = 500) {
 // ==============================
 // 2️⃣ Test User Insertion
 // ==============================
+
 async function testUsers() {
     const uniqueUsername = `testuser_${Date.now()}`;
+    const uniqueEmail = `testemail_${Date.now()}@example.com`; // ✅ Ensure email uniqueness
     const passwordHash = await bcrypt.hash("testpassword", 10);
 
     const result = await pool.query(
         `INSERT INTO users (username, email, password_hash, balance)
          VALUES ($1, $2, $3, $4) RETURNING id`,
-        [uniqueUsername, faker.internet.email(), passwordHash, 10000.00]
+        [uniqueUsername, uniqueEmail, passwordHash, 10000.00]
     );
 
     totalUsers++;
     return result.rows[0].id;
 }
+
 
 // ==============================
 // 3️⃣ Test Trade Insertion (5 per user)
@@ -86,19 +92,30 @@ async function testTrades(userId) {
 }
 
 // ==============================
-// 4️⃣ Test Positions Update
+// 4️⃣ Update Positions Based on Trades
 // ==============================
-async function testPositions(userId) {
-    await pool.query(`SELECT * FROM positions WHERE user_id = $1`, [userId]);
-    totalPositionsChecked++;
+async function updatePositions(userId) {
+    const result = await pool.query(`
+        INSERT INTO positions (user_id, symbol, quantity, average_price)
+        SELECT user_id, symbol, SUM(quantity), AVG(executed_price)
+        FROM trades 
+        WHERE user_id = $1
+        GROUP BY user_id, symbol
+        ON CONFLICT (user_id, symbol) 
+        DO UPDATE SET 
+            quantity = EXCLUDED.quantity,
+            average_price = EXCLUDED.average_price;
+    `, [userId]);
+
+    totalPositionsUpdated += result.rowCount;
 }
 
 // ==============================
 // 5️⃣ Test Leaderboard Update
 // ==============================
 async function testLeaderboard() {
-    await redis.del("leaderboard");
-    await redis.zAdd("leaderboard", { score: 50000, value: JSON.stringify({ username: "testuser" }) });
+    console.log("Updating Leaderboard...");
+    await pushLeaderboard(); // Calls the function from index.js
 }
 
 // ==============================

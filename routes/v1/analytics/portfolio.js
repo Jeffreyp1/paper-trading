@@ -51,6 +51,9 @@ router.get('/portfolio', authenticateToken, async (req,res)=>{
     }catch(error){
         return res.status(400).json({error:"Error retrieving Portfolio"})
     }
+    finally{
+        client.release()
+    }
 })
 
 export default router;
