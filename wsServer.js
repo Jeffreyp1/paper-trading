@@ -13,7 +13,7 @@ wss.on('connection', async (ws)=>{
             }
         })
         })
-      const redisData = await redis.zRangeWithScores("leaderboard", -10, -1); // Get last 10 (highest scores)
+      const redisData = await redis.zRangeWithScores("leaderboard", -10, -1,"WITHSCORES");
       const formattedLeaderboard = redisData.reverse().map(entry => {
           const userData = JSON.parse(entry.value);
           return{
@@ -29,11 +29,11 @@ wss.on('connection', async (ws)=>{
       ws.on("close", ()=>{
           console.log("User disconnected")
       })
-      
   })
 export async function pushLeaderboard(){
-    const redisData = await redis.zRangeWithScores("leaderboard", -10, -1); // Get last 10 (highest scores)
-  
+    const redisData = await redis.zRangeWithScores("leaderboard", -10, -1, "WITHSCORES"); 
+        // const redisData = await redis.zRangeWithScores("leaderboard", -10, -1, "WITHSCORES");
+        // const redisData = await redis.zRangeWithScores("leaderboard", 0, 9, { REV: true });
     const formattedLeaderboard = redisData.reverse().map(entry => {
         const userData = JSON.parse(entry.value);
         return{
@@ -42,7 +42,6 @@ export async function pushLeaderboard(){
             holdings: userData.holdings
         };
     });
-    // console.log(formattedLeaderboard)
     wss.clients.forEach(client=>{
         if (client.readyState === 1){
             client.send(JSON.stringify({type:"leaderboard", data: formattedLeaderboard}))

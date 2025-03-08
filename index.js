@@ -23,7 +23,7 @@ async function updateStockPrices() {
   const multi = redis.multi(); 
   for (const [symbol, price] of Object.entries(prices)) {
     multi.hSet("stockPrices", symbol, price);
-}
+  }
 
   try {
       await multi.exec();
@@ -40,7 +40,7 @@ async function updateLeaderboard() {
       const users = await client.query(`
       SELECT DISTINCT ON(u.id) u.id, u.username, u.balance, p.symbol, p.quantity
       FROM users u
-      JOIN positions p 
+      INNER JOIN positions p 
       ON u.id = p.user_id
       `);
       let userMap = new Map();
@@ -48,15 +48,14 @@ async function updateLeaderboard() {
           userMap.set(user.id, {
               username: user.username,
               balance: parseFloat(user.balance),
-              portfolio_value: 0,
+              // portfolio_value: 0,
               net_worth: parseFloat(user.balance),
               holdings: [] 
           });
       }
-      const stockData = redis.hGetAll("stockPrices")
-      // const holdings = await client.query(`SELECT user_id, symbol, quantity FROM positions`);
+      const stockData = await redis.hGetAll("stockPrices")
       for (const stock of users.rows) {
-        const stockPrice = stockData[stock.symbol] || 0;
+        const stockPrice = parseFloat(stockData[stock.symbol]) || 0;
         const totalValue = stockPrice * (stock.quantity || 0);
         let userEntry = userMap.get(stock.id);
         userEntry.holdings.push({
@@ -67,21 +66,14 @@ async function updateLeaderboard() {
         });
           userEntry.net_worth += totalValue;
       }
-      let leaderboard = Array.from(userMap.values()).sort(
-          (a, b) => b.net_worth - a.net_worth
-      );
-      const leaderboardKey = "leaderboard";
       const pipeline = redis.multi();
       pipeline.del("leaderboard");
-    
-      leaderboard.forEach((user) => {
+      userMap.forEach((user) => {
           const netWorth = Number(user.net_worth);
           if (isNaN(netWorth)) {
-              console.error(`Skipping ${user.username}: invalid net_worth`);
               return;
           }
-    
-          pipeline.zAdd(leaderboardKey, 
+          pipeline.zAdd("leaderboard", 
             { score: netWorth, value: JSON.stringify({ username: user.username, holdings: user.holdings || [] }) }
         );
         
@@ -102,12 +94,12 @@ async function updateLeaderboard() {
       throw error;
   }
 }
+await updateStockPrices();
+setInterval(updateStockPrices, 360000); 
 await updateLeaderboard();
 setInterval(async()=>{
   await updateLeaderboard();
-}, 360000);
-await updateStockPrices();
-setInterval(updateStockPrices, 360000); 
+}, 370000);
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`)

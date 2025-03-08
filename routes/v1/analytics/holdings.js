@@ -9,6 +9,7 @@ import 'dotenv/config';
 const router = express.Router();
 router.get('/holdings', authenticateToken, async(req,res)=>{
     const start = Date.now();
+    const client = await pool.connect()
     if (!req.user || !req.user.id){
         return res.status(401).json({error: "Unauthorized."})
     }
@@ -26,7 +27,7 @@ router.get('/holdings', authenticateToken, async(req,res)=>{
             FROM positions
             WHERE user_id = $1
         `;
-        const holdingsResult = await pool.query(holdingsQuery,[userId]);
+        const holdingsResult = await client.query(holdingsQuery,[userId]);
         console.log(holdingsResult)
         if(holdingsResult.rows.length === 0){
             return res.status(404).json({error:"No holdings found", holdings: []})
@@ -36,6 +37,9 @@ router.get('/holdings', authenticateToken, async(req,res)=>{
         return res.status(200).json({message: "Query Successful", data: holdingsResult.rows})
     }catch(error){
         return res.status(400).json({error:"Error occurred"})
+    }
+    finally{
+        client.release()
     }
 })
 export default router;
