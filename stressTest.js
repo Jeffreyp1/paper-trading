@@ -3,64 +3,81 @@ import 'dotenv/config';
 
 // API Config
 const API_URL = "http://localhost:3000/api/v1/trading/trade";
-const NUM_USERS = 100;  // Adjust if needed
-const TRADES_PER_USER = 2;
+const NUM_USERS = 10000;  // Users 5 - 10000
+const TRADES_PER_USER = 50;
 const TOTAL_TRADES = NUM_USERS * TRADES_PER_USER;
+const BATCH_SIZE = 100;  // Process 100 trades at a time
+const MAX_RETRIES = 3;  // Retry failed trades up to 3 times
 
-// Stock Symbols for Randomized Trades
+// Stock Symbols (Keep it the same)
 const STOCK_SYMBOLS = [
-    "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "BRK.B", "JNJ", "V", "PG"
+    "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "JNJ", "V", "PG"
 ];
-// **📌 Function to Generate Trade Data**
-const generateTradeData = () => {
-    const stocks = [
+
+// ✅ Generate Trade Data
+const generateTradeData = (userId) => ({
+    action: "BUY",
+    stock: [
         {
             symbol: STOCK_SYMBOLS[Math.floor(Math.random() * STOCK_SYMBOLS.length)],
-            quantity: 1 // Fixed 1 quantity per trade for test consistency
+            quantity: 1 // 1 stock per trade
         }
-    ];
-    return {
-        action:"BUY" ,
-        stock: stocks
-    };
-};
+    ],
+    userId: userId // Include userId in request
+});
 
-// **📌 Retry Function for Failed Trades**
-const retryTrade = async (tradeData, userId, retries = 3) => {
-    for (let i = 0; i < retries; i++) {
-        const start = Date.now();
-        try {
-            await axios.post(API_URL, tradeData);
-            const end = Date.now();
-            console.log(`Trade (User ${userId}) completed in ${end - start}ms`);
-            return;
-        } catch (error) {
-            console.error(`Trade Failed (User ${userId}, Attempt ${i + 1}): ${error.response?.data?.error || error.message}`);
-            await new Promise(resolve => setTimeout(resolve, 200)); // Wait before retry
+// ✅ Execute a Single Trade
+const executeTrade = async (userId, attempt = 1) => {
+    const tradeData = generateTradeData(userId);
+    
+    try {
+        const response = await axios.post(API_URL, tradeData);
+        console.log(`✅ Trade (User ${userId}) completed in ${response?.data?.time}ms`);
+    } catch (error) {
+        // Capture Detailed Error Logs
+        const errorMessage = error.response?.data?.error || error.message;
+        const statusCode = error.response?.status || "No Status";
+        const responseData = error.response?.data || "No Response Data";
+        
+        console.error(`❌ Trade Failed (User ${userId}, Attempt ${attempt})`);
+        console.error(`   → Status Code: ${statusCode}`);
+        console.error(`   → Error Message: ${errorMessage}`);
+        console.error(`   → Response Data:`, responseData);
+        
+        // Retry failed trades up to MAX_RETRIES
+        if (attempt < MAX_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms before retrying
+            return executeTrade(userId, attempt + 1);
         }
     }
-    console.error(`🚨 Trade permanently failed for User ${userId}:`, tradeData);
 };
 
-// **📌 Execute Trades with Concurrency**
+
+// ✅ Execute Trades with Controlled Speed
 const executeTrades = async () => {
-    console.log(`Starting stress test: ${NUM_USERS} users x ${TRADES_PER_USER} trades...`);
+    console.log(`📡 Starting stress test: ${NUM_USERS} users x ${TRADES_PER_USER} trades...`);
     const start = Date.now();
-    const tradeRequests = [];
+    
+    let tradeQueue = [];
 
     for (let i = 5; i <= NUM_USERS; i++) {
         for (let j = 0; j < TRADES_PER_USER; j++) {
-            const tradeData = generateTradeData();
-            tradeRequests.push(retryTrade(tradeData, i));
+            tradeQueue.push(() => executeTrade(i));
         }
     }
 
-    // ✅ Execute All Requests in Parallel
-    await Promise.all(tradeRequests);
+    // ✅ Process trades in batches with a delay
+    for (let i = 0; i < tradeQueue.length; i += BATCH_SIZE) {
+        const batch = tradeQueue.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(trade => trade()));
+
+        console.log(`🚀 Processed batch ${i / BATCH_SIZE + 1}/${Math.ceil(tradeQueue.length / BATCH_SIZE)}`);
+        await new Promise(resolve => setTimeout(resolve, Math.random() * 20 + 5)); // Random delay (5-20ms)
+    }
 
     const end = Date.now();
-    console.log(`Successfully processed ${TOTAL_TRADES} trades in ${end - start}ms.`);
+    console.log(`✅ Successfully processed ${TOTAL_TRADES} trades in ${end - start}ms.`);
 };
 
-// **🔥 Run Stress Test**
+// Run Stress Test
 executeTrades();

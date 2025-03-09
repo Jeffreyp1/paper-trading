@@ -11,9 +11,15 @@ async function executeBuy(client,prices, userId, stockData, totalCost){
         await client.query("ROLLBACK")
         throw new Error("Unable to update balance")
     }
-    const insert_trades_values = stockData.map((stock,index)=>
-        `(${userId},'${stock.symbol}', ${stock.quantity}, ${prices[index]}, 'BUY')`
-    )
+    const insert_trades_values = stockData.map((stock,index)=>{
+        const price = prices[index]
+        if (!price) {
+            console.error(`🚨 No price found for ${stock.symbol}. Skipping trade.`);
+            return null;
+        }
+        return `(${userId},'${stock.symbol}', ${stock.quantity}, ${prices[index]}, 'BUY')`
+    })
+
     const insert_trades = `
                     INSERT INTO trades (user_id, symbol, quantity, executed_price, trade_type)
                     VALUES ${insert_trades_values.join(", ")}`
@@ -56,9 +62,9 @@ async function executeSell(client, userId, symbol, quantity, stockPrice){
 }
 router.post('/trade', async (req,res)=>{
     const start = Date.now();
-    const {action, stock} = req.body
-    const userId = req.user.id
-    if (!stock){
+    const {userId, action, stock} = req.body
+    // const userId = req.user.id
+    if (!stock || !userId || !action){
         return res.status(400).json({error: "Missing required fields"})
     }
     if (!['buy','sell'].includes(action.toLowerCase())){
@@ -77,7 +83,11 @@ router.post('/trade', async (req,res)=>{
             }
             const balance = parseFloat(userResult.rows[0].balance)
             const prices = await redis.sendCommand(["HMGET", "stockPrices", ...stock_symbols]);
-            const total = stock.reduce((sum,s,index) => sum + (s.quantity) * (prices[index]))
+            // const total = stock.reduce((sum,s,index) => sum + (s.quantity) * (prices[index]))
+            const total = stock.reduce((sum, s) => {
+                const stockPrice = prices[s.symbol] || 0;  // Ensure price lookup works
+                return sum + (s.quantity * stockPrice);
+            }, 0);
             if (total < balance){
                 await client.query("BEGIN");
                 await executeBuy(client, prices, userId, stock, total)
@@ -89,7 +99,7 @@ router.post('/trade', async (req,res)=>{
             await client.query("COMMIT")
         }  
         const end = Date.now()
-        console.log(`${action} transaction took ${start-end}ms`)
+        // console.log(`${action} transaction took ${start-end}ms`)
         return res.status(200).json({message: "Successful!"})
 
     }catch(error){
