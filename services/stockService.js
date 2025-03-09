@@ -22,11 +22,9 @@ export default async function fetchStockPrices(){
         const prices = await axios.get(url)
 
         if (!prices.data || prices.data.length === 0) throw new error("No stock data received.")
-        // console.log(prices)
         const multi = redis.multi(); 
         let length = 0
         for (const stock of prices.data) {
-            console.log(stock.symbol, stock.price)
             if (stock.symbol && stock.price !== undefined){
                 multi.hSet("stockPrices", stock.symbol, stock.price);
                 length += 1
@@ -38,7 +36,6 @@ export default async function fetchStockPrices(){
 
     }
     catch(error){
-        // console.error("Stock Price Fetch Error:", error.message);
         return null;
     }
 }

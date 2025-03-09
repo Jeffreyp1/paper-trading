@@ -54,11 +54,11 @@ async function executeSell(client, userId, symbol, quantity, stockPrice){
             `,[userId, symbol, quantity, stockPrice]
     )
 }
-router.post('/trade', authenticateToken, async (req,res)=>{
+router.post('/trade', async (req,res)=>{
     const start = Date.now();
     const {action, stock} = req.body
     const userId = req.user.id
-    if (!stock || !action){
+    if (!stock){
         return res.status(400).json({error: "Missing required fields"})
     }
     if (!['buy','sell'].includes(action.toLowerCase())){
@@ -70,7 +70,6 @@ router.post('/trade', authenticateToken, async (req,res)=>{
         const stock_symbols = stock.map(data=>
             data.symbol
         )
-        // console.log(stock_symbols)
         if (action.toLowerCase() === "buy"){
             const userResult = await client.query("SELECT balance from users WHERE id = $1", [userId])
             if (userResult.rows.length === 0){
@@ -81,11 +80,13 @@ router.post('/trade', authenticateToken, async (req,res)=>{
             const total = stock.reduce((sum,s,index) => sum + (s.quantity) * (prices[index]))
             if (total < balance){
                 await client.query("BEGIN");
-                const res = await executeBuy(client, prices, userId, stock, total)
+                await executeBuy(client, prices, userId, stock, total)
                 await client.query("COMMIT")
             }
         }else if (action.toLowerCase() === 'sell'){
+            await client.query("BEGIN");
             await executeSell(client, userId, symbol, quantity, stockPrice)
+            await client.query("COMMIT")
         }  
         const end = Date.now()
         console.log(`${action} transaction took ${start-end}ms`)
