@@ -1,6 +1,7 @@
 import axios from "axios";
+import redis from "../redis.js"
 import "dotenv/config";
-
+import {pushStockPrices} from "../wsServer.js";
 const STOCK_API_KEY = process.env.STOCK_API_KEY
 const STOCKS = [
     "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "BRK.B", "JNJ", "V", "PG",
@@ -18,18 +19,26 @@ const STOCKS = [
 export default async function fetchStockPrices(){
     try{
         const url = `https://financialmodelingprep.com/api/v3/quote/${STOCKS.join(",")}?apikey=${STOCK_API_KEY}`;
-        const response = await axios.get(url)
+        const prices = await axios.get(url)
 
-        if (!response.data || response.data.length === 0) throw new error("No stock data received.")
-
-        return response.data.reduce((prices,stock) =>{
-            prices[stock.symbol] = stock.price
-            return prices;
-        }, {})
+        if (!prices.data || prices.data.length === 0) throw new error("No stock data received.")
+        // console.log(prices)
+        const multi = redis.multi(); 
+        let length = 0
+        for (const stock of prices.data) {
+            console.log(stock.symbol, stock.price)
+            if (stock.symbol && stock.price !== undefined){
+                multi.hSet("stockPrices", stock.symbol, stock.price);
+                length += 1
+            }
+        }
+        await multi.exec();
+        pushStockPrices();
+        console.log(` Updated ${length} stocks at ${new Date().toLocaleTimeString()}`);
 
     }
     catch(error){
-        console.error("Stock Price Fetch Error:", error.message);
+        // console.error("Stock Price Fetch Error:", error.message);
         return null;
     }
 }
