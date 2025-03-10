@@ -3,7 +3,6 @@ import redis from "./redis.js";
 import pool from "./db.js"
 import fetchStockPrices  from "./services/stockService.js";
 import {pushLeaderboard} from "./wsServer.js"
-import {pushStockPrices} from "./wsServer.js";
 const app = express()
 const PORT = 3000
 import routes from "./routes/v1/index.js"
@@ -15,34 +14,37 @@ async function updateLeaderboard() {
   try {
       const start = Date.now()
       const client = await pool.connect()
-      const users = await client.query(`
-      SELECT DISTINCT ON(u.id) u.id, u.username, u.balance, p.symbol, p.quantity
+      const [users,stockData] = await Promise.all([client.query(`
+      SELECT  u.id, u.username, u.balance, p.symbol, p.quantity
       FROM users u
       INNER JOIN positions p 
       ON u.id = p.user_id
-      `);
+      `),
+      redis.hGetAll("stockPrices")
+    ]);
       let userMap = new Map();
-      for (const user of users.rows) {
-          userMap.set(user.id, {
-              username: user.username,
-              balance: parseFloat(user.balance),
-              net_worth: parseFloat(user.balance),
-              holdings: [] 
-          });
-      }
-      const stockData = await redis.hGetAll("stockPrices")
-      for (const stock of users.rows) {
-        const stockPrice = parseFloat(stockData[stock.symbol]) || 0;
-        const totalValue = stockPrice * (stock.quantity || 0);
-        let userEntry = userMap.get(stock.id);
-        userEntry.holdings.push({
-            symbol: stock.symbol,
-            quantity: stock.quantity || 0,
-            currentPrice: stockPrice,
-            totalValue: totalValue
-        });
-          userEntry.net_worth += totalValue;
-      }
+        await Promise.all(users.rows.map(async(user)=>{
+            if (!userMap.has(user.id)){
+                userMap.set(user.id, {
+                    username: user.username,
+                    balance: parseFloat(user.balance),
+                    net_worth: parseFloat(user.balance),
+                    holdings: [] 
+                });
+            }
+            if(user.symbol){
+                const stockPrice = parseFloat(stockData[user.symbol]) || 0;
+                const totalValue = stockPrice * (user.quantity || 0);
+                let userEntry = userMap.get(user.id);
+                userEntry.holdings.push({
+                    symbol: user.symbol,
+                    quantity: user.quantity || 0,
+                    currentPrice: stockPrice,
+                    totalValue: totalValue
+                });
+                userEntry.net_worth += totalValue;
+            }
+        }))
       const pipeline = redis.multi();
       pipeline.del("leaderboard");
       userMap.forEach((user) => {
@@ -55,7 +57,7 @@ async function updateLeaderboard() {
       });
       try {
           await pipeline.exec();
-          pushLeaderboard(); // ✅ Broadcast updates via WebSocket
+          pushLeaderboard();
       } catch (error) {
           console.error("🚨 Leaderboard update error:", error);
       }
