@@ -34,7 +34,7 @@ func executeBuy(tx *sql.Tx, ctx context.Context, userId int, priceMap map[string
 	for _, stock := range stockData.Stock {
 		price := priceMap[stock.Symbol]
 
-		trades = append(trades, fmt.Sprintf("($%d, $%d, $%d, $%d, 'BUY')", len(args)+1, len(args)+2, len(args)+3, len(args)+4))
+		trades = append(trades, fmt.Sprintf(" ($%d, $%d, $%d, $%d, 'BUY') ", len(args)+1, len(args)+2, len(args)+3, len(args)+4))
 		positions = append(positions, fmt.Sprintf("($%d, $%d, $%d, $%d)", len(args)+1, len(args)+2, len(args)+3, len(args)+4))
 		args = append(args, userId, stock.Symbol, stock.Quantity, price)
 	}
@@ -71,6 +71,7 @@ func handleTrade(response http.ResponseWriter, request *http.Request) {
 	ctx := context.Background()
 	var tradeData TradeRequest
 	var balance float64
+	defer request.Body.Close()
 	//r.Body is parsed and is being rewritten as req
 	err := json.NewDecoder(request.Body).Decode(&tradeData)
 	if err != nil {
@@ -99,46 +100,39 @@ func handleTrade(response http.ResponseWriter, request *http.Request) {
 
 		// fmt.Println("Balance", balance)
 		priceMap := make(map[string]float64)
-		if len(stockSymbol) <= 50 {
+
+		if len(stockSymbol) <= 25 {
+			for _, symbol := range stockSymbol {
+				priceStr, err := redis.RedisClient.HGet(ctx, "stockPrices", symbol).Result()
+				if err != nil {
+					fmt.Println("Error fetching stock price for: ", symbol)
+					return
+				}
+				price, _ := strconv.ParseFloat(priceStr, 64)
+				priceMap[symbol] = price
+			}
+		} else if len(stockSymbol) <= 50 {
 			prices, err := redis.RedisClient.HMGet(ctx, "stockPrices", stockSymbol...).Result()
 			if err != nil {
 				fmt.Println("Error fetching stock prices")
+				return
 			}
 
 			for i, symbol := range stockSymbol {
 				price, _ := strconv.ParseFloat(prices[i].(string), 64)
 				priceMap[symbol] = price
 			}
+		} else {
+			pricesMap, err := redis.RedisClient.HGetAll(ctx, "stockPrices").Result()
+			if err != nil {
+				fmt.Println("Error fetching all stock prices")
+				return
+			}
+			for symbol, priceStr := range pricesMap {
+				price, _ := strconv.ParseFloat(priceStr, 64)
+				priceMap[symbol] = price
+			}
 		}
-		// if len(stockSymbol) <= 25 {
-		// 	for _, symbol := range stockSymbol {
-		// 		priceStr, err := redis.RedisClient.HGet(ctx, "stockPrices", symbol).Result()
-		// 		if err != nil {
-		// 			fmt.Println("Error fetching stock price for: ", symbol)
-		// 		}
-		// 		price, _ := strconv.ParseFloat(priceStr, 64)
-		// 		priceMap[symbol] = price
-		// 	}
-		// } else if len(stockSymbol) <= 50 {
-		// 	prices, err := redis.RedisClient.HMGet(ctx, "stockPrices", stockSymbol...).Result()
-		// 	if err != nil {
-		// 		fmt.Println("Error fetching stock prices")
-		// 	}
-
-		// 	for i, symbol := range stockSymbol {
-		// 		price, _ := strconv.ParseFloat(prices[i].(string), 64)
-		// 		priceMap[symbol] = price
-		// 	}
-		// } else {
-		// 	pricesMap, err := redis.RedisClient.HGetAll(ctx, "stockPrices").Result()
-		// 	if err != nil {
-		// 		fmt.Println("Error fetching all stock prices")
-		// 	}
-		// 	for symbol, priceStr := range pricesMap {
-		// 		price, _ := strconv.ParseFloat(priceStr, 64)
-		// 		priceMap[symbol] = price
-		// 	}
-		// }
 		var totalCost float64
 		for _, stock := range tradeData.Stock {
 			totalCost += priceMap[stock.Symbol] * stock.Quantity
@@ -148,17 +142,24 @@ func handleTrade(response http.ResponseWriter, request *http.Request) {
 			success := executeBuy(tx, ctx, userId, priceMap, tradeData, totalCost)
 			if success != nil {
 				fmt.Println("FAILED TO RUN ", success)
+				return
 			}
 			commit := tx.Commit()
 			if commit != nil {
 				fmt.Println("commit failed")
+				return
 			}
 			fmt.Println("Commit success!")
 			elapsed := time.Since(start)
 			fmt.Println("Execution time:", elapsed)
+		} else {
+			http.Error(response, "Insufficient funds", http.StatusForbidden)
+			return
 		}
 
 	}
+	response.WriteHeader(http.StatusOK)
+	response.Write([]byte(`{"message": "Trade executed successfully"}`))
 
 }
 
