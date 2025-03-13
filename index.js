@@ -2,6 +2,8 @@ import express from "express";
 import redis from "./redis.js";
 import pool from "./db.js"
 import fetchStockPrices  from "./services/stockService.js";
+import {storeBalanceToRedis,storePositionsToRedis} from './services/balancePositions.js'
+
 import {pushLeaderboard} from "./wsServer.js"
 const app = express()
 const PORT = 3000
@@ -21,7 +23,9 @@ async function updateLeaderboard() {
       ON u.id = p.user_id
       `),
       redis.hGetAll("stockPrices")
+      
     ]);
+    // const start = Date.now()
       let userMap = new Map();
         await Promise.all(users.rows.map(async(user)=>{
             if (!userMap.has(user.id)){
@@ -45,6 +49,7 @@ async function updateLeaderboard() {
                 userEntry.net_worth += totalValue;
             }
         }))
+        
       const pipeline = redis.multi();
       pipeline.del("leaderboard");
       userMap.forEach((user) => {
@@ -55,21 +60,27 @@ async function updateLeaderboard() {
           pipeline.zAdd("leaderboard", { score: netWorth, value: JSON.stringify({ username: user.username, holdings: user.holdings || [] }) }
         );
       });
+      const end = Date.now();
+    //   console.log(`✅ Leaderboard Updated! Response Time: ${end - start}ms`);
       try {
           await pipeline.exec();
           pushLeaderboard();
       } catch (error) {
           console.error("🚨 Leaderboard update error:", error);
       }
-    
-      const end = Date.now();
       console.log(`✅ Leaderboard Updated! Response Time: ${end - start}ms`);
+    
+
       
   } catch (error) {
       console.error("Error updating leaderboard:", error);
       throw error;
   }
 }
+await storeBalanceToRedis();
+setInterval(async()=>{await storeBalanceToRedis()}, 60000)
+await storePositionsToRedis();
+setInterval(async()=>{await storePositionsToRedis()}, 60000)
 await fetchStockPrices();
 setInterval(async()=>{await fetchStockPrices()}, 360000); 
 await updateLeaderboard();
