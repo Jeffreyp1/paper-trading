@@ -5,77 +5,112 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"trading-service/db"
+	"trading-service/pkg/redisClient"
 	"trading-service/redis"
 )
 
-// type TradeRequest struct {
-// 	UserID int    `json:"user_id"`
-// 	Action string `json:"action"`
-// 	Stock  []struct {
-// 		Symbol   string  `json:"symbol"`
-// 		Quantity float64 `json:"quantity"`
-// 	} `json:"stock"`
-// }
-
-func executeBuy(tx *sql.Tx, ctx context.Context, userId int, priceMap map[string]float64, stockData TradeRequest, totalCost float64) error {
-	_, err := tx.ExecContext(ctx, "Update USERS SET balance = balance - $1 WHERE id = $2", totalCost, userId)
+//	type TradeRequest struct {
+//		UserID int    `json:"user_id"`
+//		Action string `json:"action"`
+//		Stock  []struct {
+//			Symbol   string  `json:"symbol"`
+//			Quantity float64 `json:"quantity"`
+//		} `json:"stock"`
+//	}
+func executeBuy(tx *sql.Tx, ctx context.Context, userId int, stockData TradeRequest, totalCost float64, balance float64) error {
+	pipeline := redisClient.Client.TxPipeline()
+	//balance rollback
+	rollbackbalanceKey := fmt.Sprintf("rollback:balance:%d", userId)
+	err := pipeline.HSet(ctx, rollbackbalanceKey, "balance", balance).Err()
 	if err != nil {
-		return fmt.Errorf("error updating user: %w", err)
+		return fmt.Errorf("failed to store_ balance")
 	}
-	var trades []string
-	var positions []string
-	var args []interface{}
+	//balance updating
+	newBalance := balance - totalCost
+	err = pipeline.HSet(ctx, "user_balance", fmt.Sprint(userId), newBalance).Err()
+	if err != nil {
+		return fmt.Errorf("failed to store balance")
+	}
+	//positionsrollback
+	rollBackKey := fmt.Sprintf("rollback:position:%d", userId)
+	userPositions, err := redisClient.Client.HGetAll(ctx, fmt.Sprintf("positions:%d", userId)).Result()
+	for stockSymbol, position := range userPositions {
+		var curr_quantity int
+		var curr_avg_price float64
+		fmt.Sscanf(position, "%d,%f", &curr_quantity, &curr_avg_price)
+		pipeline.HSet(ctx, rollBackKey, stockSymbol, fmt.Sprintf("%d,%.2f", curr_quantity, curr_avg_price))
+	}
+	if err != nil {
+		log.Printf("Error fetching user positions: %v", err)
+		return err
+	}
+	//positions update
+	key := fmt.Sprintf("positions:%d", userId)
 	for _, stock := range stockData.Stock {
-		price := priceMap[stock.Symbol]
+		existingValue, exists := userPositions[stock.Symbol]
 
-		trades = append(trades, fmt.Sprintf(" ($%d, $%d, $%d, $%d, 'BUY') ", len(args)+1, len(args)+2, len(args)+3, len(args)+4))
-		positions = append(positions, fmt.Sprintf("($%d, $%d, $%d, $%d)", len(args)+1, len(args)+2, len(args)+3, len(args)+4))
-		args = append(args, userId, stock.Symbol, stock.Quantity, price)
-	}
-	if len(trades) == 0 {
-		return fmt.Errorf("no valid inserts")
-	}
-	if len(positions) == 0 {
-		return fmt.Errorf("no valid position to insert")
-	}
-	insert_trades := fmt.Sprintf(`
-		INSERT INTO trades (user_id, symbol, quantity, executed_price, trade_type)
-		VALUES %s`, strings.Join(trades, ", "))
-	_, err = tx.ExecContext(ctx, insert_trades, args...)
-	if err != nil {
-		return fmt.Errorf("failed to insert trades")
-	}
+		var updated_quantity int
+		var updated_average_price float64
+		temp, _ := redis.GetStockPrice(stock.Symbol)
+		curr_price := temp.Price
+		if exists {
+			var curr_quantity int
+			var curr_avg_price float64
 
-	insert_update_positions := fmt.Sprintf(
-		`Insert INTO positions (user_id, symbol, quantity, average_price)
-		VALUES %s 
-		ON CONFLICT(user_id, symbol) 
-        DO UPDATE SET
-            quantity = positions.quantity + EXCLUDED.quantity,
-            average_price = ((positions.quantity * positions.average_price) + (EXCLUDED.quantity * EXCLUDED.average_price))/ (positions.quantity + EXCLUDED.quantity),
-            updated_at = CURRENT_TIMESTAMP;`, strings.Join(positions, ", "))
-	_, err = tx.ExecContext(ctx, insert_update_positions, args...)
+			fmt.Sscanf(existingValue, "%d,%f", &curr_quantity, &curr_avg_price)
+			updated_quantity = int(stock.Quantity) + curr_quantity
+			updated_average_price = ((float64(curr_quantity) * curr_avg_price) + (float64(updated_quantity) * curr_price)) / (float64(updated_quantity) + float64(curr_quantity))
+		} else {
+			updated_quantity = int(stock.Quantity)
+		}
+		err := pipeline.HSet(ctx, key, stock.Symbol, fmt.Sprintf("%d,%.2f", stock.Quantity, updated_average_price))
+		if err != nil {
+			return fmt.Errorf("Failed to save positions to redis")
+		}
+	}
+	//rollback
+	_, err = pipeline.Exec(ctx)
 	if err != nil {
-		return fmt.Errorf(("failed to insert/update positions"))
+		restorePipeline := redisClient.Client.TxPipeline()
+		rollbackBalance, err := redisClient.Client.HGet(ctx, rollbackbalanceKey, "balance").Result()
+		if err != nil {
+			log.Printf("Failed to fetch rollback balance %v", err)
+		}
+		restorePipeline.HSet(ctx, "user_balance", fmt.Sprint(userId), rollbackBalance)
+
+		rollbackPositions, err := redisClient.Client.HGetAll(ctx, rollBackKey).Result()
+		if err != nil {
+			return fmt.Errorf("failed to rollback positions")
+		}
+		for stockSymbol, position := range rollbackPositions {
+			var curr_quantity int
+			var curr_avg_price float64
+			fmt.Sscanf(position, "%d,%f", &curr_quantity, &curr_avg_price)
+			restorePipeline.HSet(ctx, key, stockSymbol, fmt.Sprintf("%d,%.2f", curr_quantity, curr_avg_price))
+
+		}
+
+		_, err = restorePipeline.Exec(ctx)
+		if err != nil {
+			return fmt.Errorf(("Failed to restore"))
+		}
 	}
 	return nil
 }
 func handleTrade(response http.ResponseWriter, request *http.Request) {
-	start := time.Now()
+	// start := time.Now()
 	ctx := context.Background()
 	var tradeData TradeRequest
-	var balance float64
 	defer request.Body.Close()
 	//r.Body is parsed and is being rewritten as req
 	err := json.NewDecoder(request.Body).Decode(&tradeData)
 	if err != nil {
-		// responds to w or response that request is invalid
 		http.Error(response, "Invalid request", http.StatusBadRequest)
 		return
 	}
@@ -86,60 +121,25 @@ func handleTrade(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	stockSymbol := make([]string, 0, len(tradeData.Stock)) // Preallocate memory
-	for _, stock := range tradeData.Stock {
-		stockSymbol = append(stockSymbol, stock.Symbol)
-	}
+	// stockSymbol := make([]string, 0, len(tradeData.Stock)) // Preallocate memory
+	// for _, stock := range tradeData.Stock {
+	// 	stockSymbol = append(stockSymbol, stock.Symbol)
+	// }
 	userId := tradeData.UserID
 	if strings.ToLower((tradeData.Action)) == "buy" {
-		err := tx.QueryRow("SELECT balance from users WHERE id = $1 FOR UPDATE", tradeData.UserID).Scan(&balance)
+		balanceStr, err := redisClient.Client.HGet(ctx, "user_balance", fmt.Sprint(userId)).Result()
+		balance, err := strconv.ParseFloat(balanceStr, 64)
 		if err != nil {
-			http.Error(response, "User not found or error retrieving data", http.StatusBadRequest)
-		}
-		// prices, err := redisClient.HGet(ctx, "stockPrices", "META").Result()
-
-		// fmt.Println("Balance", balance)
-		priceMap := make(map[string]float64)
-
-		if len(stockSymbol) <= 25 {
-			for _, symbol := range stockSymbol {
-				priceStr, err := redis.RedisClient.HGet(ctx, "stockPrices", symbol).Result()
-				if err != nil {
-					fmt.Println("Error fetching stock price for: ", symbol)
-					return
-				}
-				price, _ := strconv.ParseFloat(priceStr, 64)
-				priceMap[symbol] = price
-			}
-		} else if len(stockSymbol) <= 50 {
-			prices, err := redis.RedisClient.HMGet(ctx, "stockPrices", stockSymbol...).Result()
-			if err != nil {
-				fmt.Println("Error fetching stock prices")
-				return
-			}
-
-			for i, symbol := range stockSymbol {
-				price, _ := strconv.ParseFloat(prices[i].(string), 64)
-				priceMap[symbol] = price
-			}
-		} else {
-			pricesMap, err := redis.RedisClient.HGetAll(ctx, "stockPrices").Result()
-			if err != nil {
-				fmt.Println("Error fetching all stock prices")
-				return
-			}
-			for symbol, priceStr := range pricesMap {
-				price, _ := strconv.ParseFloat(priceStr, 64)
-				priceMap[symbol] = price
-			}
+			http.Error(response, "User not found or balance", http.StatusBadRequest)
 		}
 		var totalCost float64
 		for _, stock := range tradeData.Stock {
-			totalCost += priceMap[stock.Symbol] * stock.Quantity
+			stockPrice, _ := redis.GetStockPrice(stock.Symbol)
+			totalCost += stockPrice.Price * stock.Quantity
 		}
 		// fmt.Println("totalCost: ", totalCost)
 		if totalCost < balance {
-			success := executeBuy(tx, ctx, userId, priceMap, tradeData, totalCost)
+			success := executeBuy(tx, ctx, userId, tradeData, totalCost, balance)
 			if success != nil {
 				fmt.Println("FAILED TO RUN ", success)
 				return
@@ -149,9 +149,9 @@ func handleTrade(response http.ResponseWriter, request *http.Request) {
 				fmt.Println("commit failed")
 				return
 			}
-			fmt.Println("Commit success!")
-			elapsed := time.Since(start)
-			fmt.Println("Execution time:", elapsed)
+			// fmt.Println("Commit success!")
+			// elapsed := time.Since(start)
+			// fmt.Println("Execution time:", elapsed)
 		} else {
 			http.Error(response, "Insufficient funds", http.StatusForbidden)
 			return
