@@ -25,15 +25,17 @@ type TradeRequest struct {
 func executeBuy(ctx context.Context, userId int, stockData TradeRequest, totalCost float64, balance float64, stockSymbol []string) error {
 	pipeline := redisClient.Client.TxPipeline()
 	//balance rollback
+	pipeline.SAdd(ctx, "queue_user", userId)
 	rollbackbalanceKey := fmt.Sprintf("rollback:balance:%d", userId)
-	pipeline.HSet(ctx, rollbackbalanceKey, "balance", balance).Err()
+	pipeline.HSet(ctx, rollbackbalanceKey, "balance", balance)
 	//balance updating
 	newBalance := balance - totalCost
-	pipeline.HSet(ctx, "user_balance", fmt.Sprint(userId), newBalance).Err()
+	pipeline.HSet(ctx, "user_balance", fmt.Sprint(userId), newBalance)
 	//positionsrollback
 	rollBackKey := fmt.Sprintf("rollback:position:%d", userId)
 	userPositions, _ := redisClient.Client.HMGet(ctx, fmt.Sprintf("positions:%d", userId), stockSymbol...).Result()
-	fmt.Printf("%+v\n", userPositions)
+	fmt.Println("userPositions:", userPositions)
+	fmt.Println("Symbols: ", stockSymbol)
 	rollbackData := make(map[string]interface{})
 	for i, position := range userPositions {
 		quantity_and_average := strings.Split(position.(string), ",")
@@ -42,29 +44,30 @@ func executeBuy(ctx context.Context, userId int, stockData TradeRequest, totalCo
 		rollbackData[stockSymbol[i]] = fmt.Sprintf("%d,%.2f", curr_quantity, curr_avg_price)
 	}
 	pipeline.HMSet(ctx, rollBackKey, rollbackData)
+
 	//positions update
 	key := fmt.Sprintf("positions:%d", userId)
 	positionsData := make(map[string]interface{})
+	// tradeData := []interface{}{}
 	for i, stock := range stockData.Stock {
-		quantity_and_average := strings.Split(userPositions[i].(string), ",")
 		var updated_quantity int
 		var updated_average_price float64
 		temp, _ := redis.GetStockPrice(stock.Symbol)
 		curr_price := temp.Price
-		if quantity_and_average != nil {
-
+		if userPositions[i] != nil {
+			quantity_and_average := strings.Split(userPositions[i].(string), ",")
 			curr_quantity, _ := strconv.Atoi(quantity_and_average[0])
 			curr_avg_price, _ := strconv.ParseFloat(quantity_and_average[1], 64)
 			updated_quantity = int(stock.Quantity) + curr_quantity
 			updated_average_price = ((float64(curr_quantity) * curr_avg_price) + (float64(updated_quantity) * curr_price)) / (float64(updated_quantity) + float64(curr_quantity))
 		} else {
 			updated_quantity = int(stock.Quantity)
+			updated_average_price = temp.Price
 		}
+
 		positionsData[stock.Symbol] = fmt.Sprintf("%d,%.2f", updated_quantity, updated_average_price)
 	}
-
 	pipeline.HMSet(ctx, key, positionsData)
-	//rollback
 	_, err := pipeline.Exec(ctx)
 	if err != nil {
 		restorePipeline := redisClient.Client.TxPipeline()
@@ -120,7 +123,6 @@ func HandleTrade(response http.ResponseWriter, request *http.Request) {
 			stockPrice, _ := redis.GetStockPrice(stock.Symbol)
 			totalCost += stockPrice.Price * stock.Quantity
 		}
-		// fmt.Println("totalCost: ", totalCost)
 		if totalCost < balance {
 			success := executeBuy(ctx, userId, tradeData, totalCost, balance, stockSymbol)
 			if success != nil {
