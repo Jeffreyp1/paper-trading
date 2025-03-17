@@ -10,8 +10,15 @@ import (
 	"strings"
 
 	"trading-service/pkg/redisClient"
-	"trading-service/redis"
+	redisStorage "trading-service/redis"
+
+	"github.com/redis/go-redis/v9"
 )
+
+type StockData struct {
+	Symbol string  `json:"symbol"`
+	Price  float64 `json:"price"`
+}
 
 type TradeRequest struct {
 	UserID int    `json:"user_id"`
@@ -19,91 +26,53 @@ type TradeRequest struct {
 	Stock  []struct {
 		Symbol   string  `json:"symbol"`
 		Quantity float64 `json:"quantity"`
+		Price    float64 `json:"price"`
 	} `json:"stock"`
 }
 
-func executeBuy(ctx context.Context, userId int, stockData TradeRequest, totalCost float64, balance float64, stockSymbol []string) error {
-	pipeline := redisClient.Client.TxPipeline()
-	//balance rollback
-	pipeline.SAdd(ctx, "queue_user", userId)
-	rollbackbalanceKey := fmt.Sprintf("rollback:balance:%d", userId)
-	pipeline.HSet(ctx, rollbackbalanceKey, "balance", balance)
-	//balance updating
-	newBalance := balance - totalCost
-	pipeline.HSet(ctx, "user_balance", fmt.Sprint(userId), newBalance)
-	//positionsrollback
-	userPositions, _ := redisClient.Client.HMGet(ctx, fmt.Sprintf("positions:%d", userId), stockSymbol...).Result()
-
-	//positions update
-	key := fmt.Sprintf("positions:%d", userId)
-	positionsData := make(map[string]interface{})
-	rollBackKey := fmt.Sprintf("rollback:position:%d", userId)
-	rollbackData := make(map[string]interface{})
-
-	for i, stock := range stockData.Stock {
-		var updated_quantity, curr_quantity int
-		var updated_average_price, curr_avg_price float64
-		temp, _ := redis.GetStockPrice(stock.Symbol)
-		curr_price := temp.Price
-		if userPositions[i] != nil {
-			quantity_and_average := strings.Split(userPositions[i].(string), ",")
-			curr_quantity, _ = strconv.Atoi(quantity_and_average[0])
-			curr_avg_price, _ = strconv.ParseFloat(quantity_and_average[1], 64)
-			updated_quantity = int(stock.Quantity) + curr_quantity
-			updated_average_price = ((float64(curr_quantity) * curr_avg_price) + (float64(stock.Quantity) * curr_price)) / (float64(stock.Quantity) + float64(curr_quantity))
-		} else {
-			curr_quantity = 0
-			curr_avg_price = 0
-			updated_quantity = int(stock.Quantity)
-			updated_average_price = temp.Price
-		}
-		rollbackData[stockSymbol[i]] = fmt.Sprintf("%d,%.2f", curr_quantity, curr_avg_price)
-		positionsData[stock.Symbol] = fmt.Sprintf("%d,%.2f", updated_quantity, updated_average_price)
-	}
-	pipeline.HMSet(ctx, rollBackKey, rollbackData)
-	pipeline.HMSet(ctx, key, positionsData)
-	_, err := pipeline.Exec(ctx)
+func executeBuy(ctx context.Context, trade TradeRequest, balance float64, totalCost float64) {
+	// ✅ Convert stock slice to JSON
+	stockJSON, err := json.Marshal(trade.Stock)
 	if err != nil {
-		restorePipeline := redisClient.Client.TxPipeline()
-		rollbackBalance, err := redisClient.Client.HGet(ctx, rollbackbalanceKey, "balance").Result()
-		if err != nil {
-			log.Printf("Failed to fetch rollback balance %v", err)
-		}
-		restorePipeline.HSet(ctx, "user_balance", fmt.Sprint(userId), rollbackBalance)
-
-		rollbackPositions, err := redisClient.Client.HGetAll(ctx, rollBackKey).Result()
-		if err != nil {
-			return fmt.Errorf("failed to rollback positions")
-		}
-		for stockSymbol, position := range rollbackPositions {
-			var curr_quantity int
-			var curr_avg_price float64
-			fmt.Sscanf(position, "%d,%f", &curr_quantity, &curr_avg_price)
-			restorePipeline.HSet(ctx, key, stockSymbol, fmt.Sprintf("%d,%.2f", curr_quantity, curr_avg_price))
-
-		}
-
-		_, err = restorePipeline.Exec(ctx)
-		if err != nil {
-			return fmt.Errorf(("failed to restore"))
-		}
+		log.Fatalf("Failed to serialize stock data: %v", err)
+		return
 	}
-	return nil
+
+	// ✅ Push to Redis Stream
+	// fmt.Println(trade.Stock)
+	pipeline := redisClient.Client.TxPipeline()
+	pipeline.HSet(ctx, "user_balance", fmt.Sprint(trade.UserID), balance-totalCost)
+	stock, err := pipeline.XAdd(ctx, &redis.XAddArgs{
+		Stream: "buy_stream",
+		Values: map[string]interface{}{
+			"user_id": trade.UserID,
+			"action":  trade.Action,
+			"balance": balance - totalCost,
+			"stocks":  string(stockJSON),
+		},
+	}).Result()
+	if err != nil {
+		log.Fatalf("Failed to push trade to Redis Stream: %v", err)
+		redisClient.Client.HSet(ctx, "user_balance", fmt.Sprint(trade.UserID), balance)
+		return
+	} else {
+		fmt.Println(stock)
+	}
+	_, err = pipeline.Exec(ctx)
+	if err != nil {
+		log.Fatalf("Failed to execute pipeline: %v", err)
+	}
+	log.Println("✅ Trade successfully added to Redis Stream!")
 }
+
 func HandleTrade(response http.ResponseWriter, request *http.Request) {
-	// start := time.Now()
 	ctx := context.Background()
 	var tradeData TradeRequest
 	defer request.Body.Close()
-	//r.Body is parsed and is being rewritten as req
 	err := json.NewDecoder(request.Body).Decode(&tradeData)
 	if err != nil {
 		http.Error(response, "Invalid request", http.StatusBadRequest)
 		return
-	}
-	var stockSymbol []string
-	for _, stock := range tradeData.Stock {
-		stockSymbol = append(stockSymbol, stock.Symbol)
 	}
 	userId := tradeData.UserID
 	if strings.ToLower((tradeData.Action)) == "buy" {
@@ -113,16 +82,21 @@ func HandleTrade(response http.ResponseWriter, request *http.Request) {
 			http.Error(response, "User not found or balance", http.StatusBadRequest)
 		}
 		var totalCost float64
-		for _, stock := range tradeData.Stock {
-			stockPrice, _ := redis.GetStockPrice(stock.Symbol)
+		for i, stock := range tradeData.Stock {
+			stockPrice, err := redisStorage.GetStockPrice(stock.Symbol)
+			if err != nil {
+				log.Printf("Failed to fetch price")
+			} else {
+				tradeData.Stock[i].Price = stockPrice.Price
+			}
 			totalCost += stockPrice.Price * stock.Quantity
 		}
 		if totalCost < balance {
-			success := executeBuy(ctx, userId, tradeData, totalCost, balance, stockSymbol)
-			if success != nil {
-				fmt.Println("FAILED TO RUN ", success)
-				return
-			}
+			executeBuy(ctx, tradeData, balance, totalCost)
+			// if success != nil {
+			// 	fmt.Println("FAILED TO RUN ", success)
+			// 	return
+			// }
 		} else {
 			http.Error(response, "Insufficient funds", http.StatusForbidden)
 			return
