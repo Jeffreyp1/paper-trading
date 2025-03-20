@@ -19,37 +19,30 @@ router.get('/portfolio', authenticateToken, async (req,res)=>{
     if (!userId){
         return res.status(400).json({error:"Missing userId"})
     }
+   
     try{
-        const holdingsQuery = `
-            SELECT
-                users.id,
-                symbol, 
-                quantity,
-                average_price,
-                users.balance
-            FROM positions
-            JOIN users ON positions.user_id = users.id
-            WHERE user_id = $1
-        `
-        const holdingsResult = await client.query(holdingsQuery,[userId]);
-        let total_investment = parseFloat(holdingsResult.rows[0].balance)
-        let current_value = parseFloat(holdingsResult.rows[0].balance)
-        const stock_symbols = holdingsResult.rows.map(data=>data.symbol)
+        const balance = await redis.hGet("user_balance", userId.toString())
+        const user_balance = balance ? parseFloat(balance) : 0
+        let total_investment = user_balance
+        let current_value = user_balance
+        const positions = await redis.hGetAll(`positions:${userId}`)
+        const stock_symbols = Object.keys(positions)
         const prices = await redis.sendCommand(["HMGET", "stockPrices", ...stock_symbols]);
-        if (!prices){
-            console.error("Failed to retrieve stock prices from Redis")
-        }
-        holdingsResult.rows.forEach((val,index) => {
-            current_value += (val.quantity) * parseFloat(prices[index])
-            total_investment += (val.quantity) * val.average_price
+        var index = 0;
+        Object.entries(positions).forEach(([symbol, value])=>{
+            const [quantity, avgPrice] = value.split(",").map(Number);
+            total_investment += quantity * avgPrice
+            current_value += quantity * prices[index]
+            index += 1
         })
         let return_on_investment = (current_value - total_investment) / total_investment * 100
         const end = Date.now();
         console.log(` Portfolio API Response Time: ${end - start}ms`);
 
-        res.status(200).json({current_value: current_value.toFixed(2), total_investment: total_investment.toFixed(2), ROI: return_on_investment.toFixed(2)+"%"})
+
+        return res.status(200).json({current_value: current_value.toFixed(2), total_investment: total_investment.toFixed(2), ROI: return_on_investment.toFixed(2)+"%"})
     }catch(error){
-        return res.status(400).json({error:"Error retrieving Portfolio"})
+        return res.status(400).json({error:"Error retrieving Portfolio", error})
     }
     finally{
         client.release()
