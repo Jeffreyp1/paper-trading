@@ -33,7 +33,7 @@ func TradeWorker(id int, jobs <-chan TradeJob, wg *sync.WaitGroup) {
 		for i, stock := range tradeData.Stock {
 			stockPrice, err := redisStorage.GetStockPrice(stock.Symbol)
 			if err != nil {
-				log.Printf("Failed to fetch price")
+				log.Printf("Failed to fetch price", err)
 			} else {
 				tradeData.Stock[i].Price = stockPrice.Price
 			}
@@ -50,7 +50,9 @@ func TradeWorker(id int, jobs <-chan TradeJob, wg *sync.WaitGroup) {
 
 func StartWorkerPool(workerCount int, jobs chan TradeJob) {
 	var wg sync.WaitGroup
-
+	if jobs == nil {
+		log.Fatal("Trade job queue (jobs) is nil")
+	}
 	for i := 1; i <= workerCount; i++ {
 		wg.Add(1)
 		go TradeWorker(i, jobs, &wg)
