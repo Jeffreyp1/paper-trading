@@ -27,13 +27,12 @@ router.get('/portfolio', authenticateToken, async (req,res)=>{
         let current_value = user_balance
         const positions = await redis.hGetAll(`positions:${userId}`)
         const stock_symbols = Object.keys(positions)
+        const stock_values = Object.values(positions)
         const prices = await redis.sendCommand(["HMGET", "stockPrices", ...stock_symbols]);
-        var index = 0;
-        Object.entries(positions).forEach(([symbol, value])=>{
-            const [quantity, avgPrice] = value.split(",").map(Number);
+        stock_symbols.forEach((symbol,index)=>{
+            const [quantity, avgPrice] = stock_values[index].split(",").map(Number);
             total_investment += quantity * avgPrice
             current_value += quantity * prices[index]
-            index += 1
         })
         let return_on_investment = (current_value - total_investment) / total_investment * 100
         const end = Date.now();
