@@ -2,9 +2,10 @@ import axios from "axios";
 import redis from "../redis.js"
 import "dotenv/config";
 import {pushStockPrices} from "../wsServer.js";
+const localStockCache = new Map(); // Local in-memory storage
 const STOCK_API_KEY = process.env.STOCK_API_KEY
 const STOCKS = [
-    "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "BRK.B", "JNJ", "V", "PG",
+    "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "JNJ", "V", "PG",
     "NVDA", "UNH", "HD", "MA", "DIS", "BAC", "VZ", "ADBE", "CMCSA", "NFLX",
     "PFE", "T", "KO", "NKE", "MRK", "INTC", "CSCO", "XOM", "CVX", "ABT",
     "ORCL", "CRM", "PEP", "IBM", "MCD", "WFC", "QCOM", "UPS", "COST", "MDT",
@@ -25,6 +26,7 @@ export default async function fetchStockPrices(){
         const multi = redis.multi(); 
         let length = 0
         for (const stock of prices.data) {
+            
             if (stock.symbol && stock.price !== undefined){
                 multi.hSet("stockPrices", stock.symbol, stock.price);
                 length += 1
