@@ -5,11 +5,11 @@ export async function storeBalanceToRedis(){
     const count = await redis.hLen("user_balance")
     if (count === 0){
         const result = await pool.query("SELECT id, balance FROM users")
-        const balances = {}
+        const balances = []
         result.rows.forEach(user=>{
-            balances[user.id] = user.balance
+            balances.push(user.id.toString(), user.balance.toString())
         })
-        await redis.hSet("user_balance", balances)
+        await redis.hSet("user_balance", ...balances)
         console.log("Added user balance to redis")
     }else{
         console.log("Users have already been stored in redis")
@@ -19,7 +19,7 @@ export async function storeBalanceToRedis(){
 export async function storePositionsToRedis(){
     const start = Date.now()
     const count = await redis.keys("positions:*")
-    if (count === 0){
+    if (count.length === 0){
         const result = await pool.query("SELECT user_id, symbol, quantity, average_price FROM positions")
         const pipeline = redis.multi()
         result.rows.forEach(user=>{
