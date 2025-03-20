@@ -19,24 +19,16 @@ router.get('/holdings', authenticateToken, async(req,res)=>{
 
     }
     try{
-        const holdingsQuery = `
-            SELECT
-                symbol,
-                quantity,
-                average_price
-            FROM positions
-            WHERE user_id = $1
-        `;
-        const holdingsResult = await client.query(holdingsQuery,[userId]);
-        console.log(holdingsResult)
-        if(holdingsResult.rows.length === 0){
-            return res.status(404).json({error:"No holdings found", holdings: []})
-        }
+        const positions = await redis.hGetAll(`positions:${userId}`)
+        const val = Object.entries(positions).map(([symbol, value])=>{
+            const [quantity, avgPrice] = value.split(",").map(Number);
+            return {symbol, quantity, avgPrice};
+        })
         const end = Date.now();
         console.log(` Portfolio API Response Time: ${end - start}ms`);
-        return res.status(200).json({message: "Query Successful", data: holdingsResult.rows})
+        return res.status(200).json({message: "Query Successful", data: val})
     }catch(error){
-        return res.status(400).json({error:"Error occurred"})
+        return res.status(400).json({error:"Error occurred", error})
     }
     finally{
         client.release()
