@@ -15,9 +15,9 @@ var Client *redis.Client
 func InitRedis() {
 	Client = redis.NewClient(&redis.Options{
 		Addr:         "localhost:6379",
-		PoolSize:     10, // Increase this based on your system's capabilities
-		MinIdleConns: 5,  // Keep some connections ready
-		PoolTimeout:  time.Second * 3,
+		PoolSize:     75,
+		MinIdleConns: 5,
+		PoolTimeout:  time.Second * 10,
 	})
 	_, err := Client.Ping(Ctx).Result()
 	if err != nil {
