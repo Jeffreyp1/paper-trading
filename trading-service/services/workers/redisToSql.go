@@ -30,6 +30,8 @@ var (
 	TotalSQLTime      time.Duration
 )
 
+var ProcessedTrades int64
+
 func addToSQL(db *sql.DB, userId int, action string, balance float64, stocks []struct {
 	Symbol   string  `json:"symbol"`
 	Quantity float64 `json:"quantity"`
@@ -68,12 +70,12 @@ func addToSQL(db *sql.DB, userId int, action string, balance float64, stocks []s
 
 	insert_update_positions := fmt.Sprintf(
 		`Insert INTO positions (user_id, symbol, quantity, average_price)
-		VALUES %s 
-		ON CONFLICT(user_id, symbol) 
-        DO UPDATE SET
-            quantity = positions.quantity + EXCLUDED.quantity,
-            average_price = ((positions.quantity * positions.average_price) + (EXCLUDED.quantity * EXCLUDED.average_price))/ (positions.quantity + EXCLUDED.quantity),
-            updated_at = CURRENT_TIMESTAMP;`, strings.Join(positions, ", "))
+		VALUES %s
+		ON CONFLICT(user_id, symbol)
+	    DO UPDATE SET
+	        quantity = positions.quantity + EXCLUDED.quantity,
+	        average_price = ((positions.quantity * positions.average_price) + (EXCLUDED.quantity * EXCLUDED.average_price))/ (positions.quantity + EXCLUDED.quantity),
+	        updated_at = CURRENT_TIMESTAMP;`, strings.Join(positions, ", "))
 	_, err = tx.ExecContext(ctx, insert_update_positions, args...)
 	if err != nil {
 		tx.Rollback()
@@ -112,13 +114,6 @@ func processTrade(workerId int, db *sql.DB) {
 			log.Println("Error reading from Redis Stream: ", err)
 			break
 		}
-		//  else {
-		// 	if len(messages) == 0 || len(messages[0].Messages) == 0 {
-		// 		log.Printf("⚠️ Worker %d found no messages", workerId)
-		// 		continue
-		// 	}
-		// }
-		// log.Printf("reading message now!")
 		for _, message := range messages[0].Messages {
 			jobID := message.ID
 			values := message.Values
@@ -170,7 +165,11 @@ func processTrade(workerId int, db *sql.DB) {
 			if err != nil {
 				log.Println("Error acknowledging job: ", err)
 			} else {
-				log.Printf("Trade %s acknowledged", jobID)
+				_, trimErr := redisClient.Client.XTrimMinID(context.Background(), "buy_stream", jobID).Result()
+				if trimErr != nil {
+					log.Println("❌ Error trimming Redis stream:", trimErr)
+				}
+				// log.Printf("Trade %s acknowledged", jobID)
 				// redisClient.Client.XTrimMaxLen(context.Background(), "buy_stream", 200000).Result()
 				// if trimErr != nil {
 				// 	log.Println("❌ Error trimming Redis stream: ", trimErr)
@@ -192,8 +191,6 @@ func StartSQLWorkerPool(workerCount int, db *sql.DB) {
 		}(i)
 	}
 
-	go func() {
-		wg.Wait()
-	}()
+	wg.Wait()
 
 }
