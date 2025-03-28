@@ -5,27 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 	"trade-worker/pkg/redisClient"
 
-	"github.com/confluentinc/confluent-kafka-go/kafka"
-	"github.com/redis/go-redis/v9"
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// func addToKafka( userId int, action string, balance float64, stocks []struct {
-// 	Symbol   string  `json:"symbol"`
-// 	Quantity float64 `json:"quantity"`
-// 	Price    float64 `json:"price"`
-// }) error{
+func addToKafka(userId int, action string, balance float64, stocks []struct {
+	Symbol   string  `json:"symbol"`
+	Quantity float64 `json:"quantity"`
+	Price    float64 `json:"price"`
+}) error {
 
-//		return nil
-//	}
-//
-//	var kafkaWriter = kafka.NewWriter(kafka.WriterConfig{
-//		Brokers:  []string{"localhost:9092"}, // your broker
-//		Topic:    "trades-topic",
-//		Balancer: &kafka.LeastBytes{},
-//	})
+	return nil
+}
+
 var producer *kafka.Producer
 
 func initKafkaProducer() {
@@ -34,13 +29,13 @@ func initKafkaProducer() {
 		"bootstrap.servers": "localhost:9092", // update if needed
 	})
 	if err != nil {
-		log.Fatalf("❌ Failed to create Kafka producer: %v", err)
+		log.Fatalf("Failed to create Kafka producer: %v", err)
 	}
 }
 func processRedisStream(workerId int) error {
 	for {
 		// log.Printf("📥 Worker %d attempting to read from `buy_stream`...", workerId)
-		messages, err := redisClient.Client.XReadGroup(context.Background(), &redis.XReadGroupArgs{
+		messages, err := redisClient.Client.XReadGroup(context.Background(), &redisClient.XReadGroupArgs{
 			Group:    "kafka_workers",
 			Consumer: fmt.Sprintf("redisConsumer-%d", workerId),
 			Streams:  []string{"buy_stream", ">"},
@@ -59,52 +54,37 @@ func processRedisStream(workerId int) error {
 		}
 		for _, message := range messages[0].Messages {
 			jobID := message.ID
-			jsonPayload, err := json.Marshal((message.Values))
-			// values := message.Values
-			// tempUserId, ok := values["user_id"].(string)
-			// if !ok || tempUserId == "" {
-			// 	log.Println("Missing or invalid user_id", values)
-			// 	continue
-			// }
-			// userId, err := strconv.Atoi(tempUserId)
-			// if err != nil {
-			// 	log.Printf("Error converting user_id", values)
-			// }
-			// action, ok := values["action"].(string)
-			// if !ok {
-			// 	log.Printf("Missing or invalid action", values)
-			// 	continue
-			// }
-			// balanceStr, ok := values["balance"].(string)
-			// if !ok {
-			// 	log.Printf("Missing or invalid balance", values)
-			// 	continue
-			// }
-			// balance, err := strconv.ParseFloat(balanceStr, 64)
-			// if err != nil {
-			// 	log.Printf("Failed to convert balance to float", values)
-			// 	continue
-			// }
-			// stockData, ok := values["stocks"].(string)
-			// if !ok {
-			// 	log.Printf("Failed to retrieve list of stocks")
-			// 	continue
-			// }
-			// var stocks []struct {
-			// 	Symbol   string  `json:"symbol"`
-			// 	Quantity float64 `json:"quantity"`
-			// 	Price    float64 `json:"price"`
-			// }
-			// err = json.Unmarshal([]byte(stockData), &stocks)
-			// if err != nil {
-			// 	log.Println("Failed to deserialized stock data: ", err)
-			// 	continue
-			// }
-			// // err = addToKafka(userId, action, balance, stocks)
-			// if err != nil {
-			// 	log.Println("Error processing to SQL: ", err)
-			// 	continue
-			// }
+			values := message.Values
+			tempUserId, ok := values["user_id"].(string)
+			if !ok || tempUserId == "" {
+				log.Println("Missing or invalid user_id", values)
+				continue
+			}
+			_, err := strconv.Atoi(tempUserId)
+			if err != nil {
+				log.Printf("Error converting user_id", values)
+			}
+			_, ok = values["action"].(string)
+			if !ok {
+				log.Printf("Missing or invalid action", values)
+				continue
+			}
+			balanceStr, ok := values["balance"].(string)
+			if !ok {
+				log.Printf("Missing or invalid balance", values)
+				continue
+			}
+			_, err = strconv.ParseFloat(balanceStr, 64)
+			if err != nil {
+				log.Printf("Failed to convert balance to float", values)
+				continue
+			}
+			_, ok = values["stocks"].(string)
+			if !ok {
+				log.Printf("Failed to retrieve list of stocks")
+				continue
+			}
+			jsonPayload, err := json.Marshal(values)
 			err = producer.Produce(&kafka.Message{
 				TopicPartition: kafka.TopicPartition{Topic: ptr("trade_events"), Partition: kafka.PartitionAny},
 				Value:          jsonPayload,
@@ -118,7 +98,7 @@ func processRedisStream(workerId int) error {
 			} else {
 				_, trimErr := redisClient.Client.XTrimMinID(context.Background(), "buy_stream", jobID).Result()
 				if trimErr != nil {
-					log.Println("❌ Error trimming Redis stream:", trimErr)
+					log.Println("Error trimming Redis stream:", trimErr)
 				}
 			}
 		}
