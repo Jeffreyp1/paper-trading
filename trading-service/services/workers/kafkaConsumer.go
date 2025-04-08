@@ -7,7 +7,8 @@ import (
 	"log"
 	"strconv"
 	"time"
-	"trade-worker/pkg/redisClient"
+	redis "github.com/redis/go-redis/v9"
+	redisClient "trading-service/pkg/redisClient"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
@@ -35,7 +36,7 @@ func initKafkaProducer() {
 func processRedisStream(workerId int) error {
 	for {
 		// log.Printf("📥 Worker %d attempting to read from `buy_stream`...", workerId)
-		messages, err := redisClient.Client.XReadGroup(context.Background(), &redisClient.XReadGroupArgs{
+		messages, err := redisClient.Client.XReadGroup(context.Background(), &redis.XReadGroupArgs{
 			Group:    "kafka_workers",
 			Consumer: fmt.Sprintf("redisConsumer-%d", workerId),
 			Streams:  []string{"buy_stream", ">"},
@@ -106,7 +107,7 @@ func processRedisStream(workerId int) error {
 	return nil
 }
 
-func StartKafkaConsumer(workerCount int) {
+func StartKafkaProducer(workerCount int) {
 
 	for i := 1; i <= workerCount; i++ {
 		go processRedisStream(i)
