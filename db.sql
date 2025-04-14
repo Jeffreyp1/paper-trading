@@ -48,11 +48,12 @@ CREATE TABLE IF NOT EXISTS positions (
     quantity        INT             NOT NULL DEFAULT 0,
     average_price   NUMERIC(12,2)   NOT NULL DEFAULT 0.00,
     created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
     
     CONSTRAINT fk_user_positions FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
-    CONSTRAINT unique_user_stock UNIQUE (user_id, symbol) -- 🆕 Ensures one row per user-stock pair
+    CONSTRAINT unique_user_stock UNIQUE (user_id, symbol)
 );
+
 
 -- ==============================
 -- 5) Orders Table (For Advanced Order Management)
