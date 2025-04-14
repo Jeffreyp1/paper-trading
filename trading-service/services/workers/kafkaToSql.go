@@ -33,7 +33,8 @@ func processKafka(workerId int, db *sql.DB) error {
 	r, err := kafka.NewConsumer(&kafka.ConfigMap{
 		"bootstrap.servers": "localhost:9092",
 		"group.id":          "postgres-writer",
-		// "auto.offset.reset": "earliest",
+		"auto.offset.reset": "earliest",
+		"enable.auto.commit": true,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create Kafka Consumer: %v", err)
@@ -50,6 +51,7 @@ func processKafka(workerId int, db *sql.DB) error {
 
 	for {
 		event, err := r.ReadMessage(100 * time.Millisecond)
+		// log.Printf("✅ Kafka Message: %s", string(event))
 		if err == nil {
 			var t Trade
 			if err := json.Unmarshal(event.Value, &t); err != nil {

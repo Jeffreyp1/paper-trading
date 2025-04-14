@@ -35,9 +35,9 @@ func TradeWorker(id int, jobs <-chan TradeJob, wg *sync.WaitGroup) {
 			if err != nil {
 				log.Printf("Failed to fetch price", err)
 			} else {
-				tradeData.Stock[i].Price = stockPrice.Price
+				tradeData.Stock[i].Price = stockPrice
 			}
-			totalCost += stockPrice.Price * stock.Quantity
+			totalCost += stockPrice * stock.Quantity
 		}
 		if totalCost < balance {
 			trade_service.ExecuteBuy(ctx, tradeData, balance, totalCost)
