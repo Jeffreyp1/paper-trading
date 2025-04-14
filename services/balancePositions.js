@@ -9,7 +9,11 @@ export async function storeBalanceToRedis(){
         result.rows.forEach(user=>{
             balances.push(user.id.toString(), user.balance.toString())
         })
-        await redis.hSet("user_balance", ...balances)
+        if (balances.length > 0){
+            await redis.hSet("user_balance", ...balances)
+        }else{
+            console.log("There are no existing users")
+        }
         console.log("Added user balance to redis")
     }else{
         console.log("Users have already been stored in redis")
