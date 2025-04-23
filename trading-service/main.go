@@ -1,239 +1,825 @@
+// main.go — API + load‑test version
+
 package main
 
 import (
-	"context"
-	"log"
-	"math/rand"
-	"runtime"
-	"sync"
-	"sync/atomic"
-	"time"
+    "bytes"
+    "encoding/json"
+    "log"
+    "math/rand"
+    "net/http"
+    "runtime"
+    "sync/atomic"
+    "time"
 
-	"trading-service/db"
-	"trading-service/pkg/redisClient"
-	trade "trading-service/services/trade"
-	workers "trading-service/services/workers"
+    "github.com/go-chi/chi/v5"
+
+    "trading-service/db"
+    "trading-service/pkg/redisClient"
+    redisStorage "trading-service/redis"
+    trade_service "trading-service/services/trade"
+    "trading-service/services/workers"
 )
 
-var totalStocksTraded int64 // 🔢 total quantity of stocks traded
-
+// ─── global counters ───────────────────────────────────────────────────────────
 var (
-	// Worker concurrency params
-	baseWorkers     = runtime.NumCPU() * 2
-	workerIncrement = 4
-	maxWorkers      = 200
-	currentWorkers  = 30
-
-	// Performance tracking
-	totalTrades     int64
-	totalTradeTime  time.Duration
-	tradeMutex      sync.Mutex
-	tradeTimestamps []time.Time
+    totalTrades        int64
+    totalStocksTraded  int64
 )
 
-const testDuration = 1 * time.Second
+const (
+    testDuration   = 5 * time.Second
+    workerCount    = 30
+)
 
-var stockList = []string{
-	"AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "JNJ", "V", "PG",
-	"NVDA", "UNH", "HD", "MA", "DIS", "BAC", "VZ", "ADBE", "CMCSA", "NFLX",
-	"PFE", "T", "KO", "NKE", "MRK", "INTC", "CSCO", "XOM", "CVX", "ABT",
-	"ORCL", "CRM", "PEP", "IBM", "MCD", "WFC", "QCOM", "UPS", "COST", "MDT",
-	"CAT", "HON", "AMGN", "LLY", "PM", "BLK", "GE", "BA", "SBUX", "MMM",
-	"F", "GM", "ADP", "SPGI", "RTX", "TMO", "NOW", "BKNG", "MO", "ZTS",
-	"COP", "AXP", "SCHW", "CVS", "LOW", "DE", "MET", "PNC", "GS", "CI",
-	"TJX", "ICE", "PLD", "DUK", "SO", "ED", "OXY", "FDX", "MMC", "EXC",
-	"EQIX", "SLB", "GD", "APD", "NEE", "EOG", "LMT", "USB", "HCA", "BK",
-	"ITW", "AEP", "ECL", "PGR", "CSX", "CB", "MS", "TRV", "AON", "VLO",
-}
+// ─── random stock list (trimmed for brevity) ───────────────────────────────────
+var stockList = []string{"AAPL", "MSFT", "AMZN", "GOOGL", "META"}
 
-// ✅ Fetch real user IDs from the DB
+// ─── helper: fetch user ids from DB ─────────────────────────────────────────────
 func fetchAllUserIDs() []int {
-	rows, err := db.DB.Query("SELECT id FROM users")
-	if err != nil {
-		log.Fatalf("Failed to query users: %v", err)
-	}
-	defer rows.Close()
+    rows, err := db.DB.Query("SELECT id FROM users")
+    if err != nil {
+        log.Fatalf("query users: %v", err)
+    }
+    defer rows.Close()
 
-	var userIDs []int
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			log.Printf("Failed to scan row: %v", err)
-			continue
-		}
-		userIDs = append(userIDs, id)
-	}
-
-	if err := rows.Err(); err != nil {
-		log.Fatalf("Error iterating rows: %v", err)
-	}
-
-	log.Printf("✅ Loaded %d user IDs from database", len(userIDs))
-	return userIDs
+    var ids []int
+    for rows.Next() {
+        var id int
+        rows.Scan(&id)
+        ids = append(ids, id)
+    }
+    return ids
 }
 
-func generateRandomTrade(userID int) trade.TradeRequest {
-	return trade.TradeRequest{
-		UserID: userID,
-		Action: "BUY",
-		Stock: []struct {
-			Symbol   string  `json:"symbol"`
-			Quantity float64 `json:"quantity"`
-			Price    float64 `json:"price"`
-		}{
-			{
-				Symbol:   stockList[rand.Intn(len(stockList))],
-				Quantity: float64(rand.Intn(5) + 1),
-				Price:    100.0,
-			},
-		},
-	}
+// ─── helper: create random trade request ───────────────────────────────────────
+func randomTrade(userID int) trade_service.TradeRequest {
+    return trade_service.TradeRequest{
+        UserID: userID,
+        Action: "BUY",
+        Stock: []struct {
+            Symbol   string  `json:"symbol"`
+            Quantity float64 `json:"quantity"`
+            Price    float64 `json:"price"`
+        }{{
+            Symbol:   stockList[rand.Intn(len(stockList))],
+            Quantity: float64(rand.Intn(5) + 1),
+            Price:    0,
+        }},
+    }
 }
 
-var inFlightUsers sync.Map
-
-func executeTrade(userID int) {
-	if _, exists := inFlightUsers.LoadOrStore(userID, struct{}{}); exists {
-		return
-	}
-	defer inFlightUsers.Delete(userID)
-
-	tradeData := generateRandomTrade(userID)
-
-	start := time.Now()
-	balance := 100000.0
-	totalCost := tradeData.Stock[0].Price * tradeData.Stock[0].Quantity
-
-	trade.ExecuteBuy(context.Background(), tradeData, balance, totalCost)
-
-	elapsed := time.Since(start)
-
-	tradeMutex.Lock()
-	totalTradeTime += elapsed
-	tradeTimestamps = append(tradeTimestamps, time.Now())
-	tradeMutex.Unlock()
-
-	atomic.AddInt64(&totalTrades, 1)
-	for _, s := range tradeData.Stock {
-		atomic.AddInt64(&totalStocksTraded, int64(s.Quantity))
-	}
+// ─── API handler: enqueue trade ────────────────────────────────────────────────
+func tradeHandler(w http.ResponseWriter, r *http.Request) {
+    var req trade_service.TradeRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "bad json", http.StatusBadRequest)
+        return
+    }
+    select {
+    case workers.TradeJobQueue <- workers.TradeJob{Trade: req}:
+        w.WriteHeader(http.StatusAccepted)
+    default:
+        http.Error(w, "queue full", http.StatusServiceUnavailable)
+    }
 }
 
-func runTest(concurrent bool) {
-	log.Printf("🚀 Running Load Test | concurrent=%t | workers=%d", concurrent, currentWorkers)
-	var wg sync.WaitGroup
-
-	userIDs := fetchAllUserIDs()
-
-	if concurrent {
-		tradeChan := make(chan int, 1000)
-		for i := 0; i < currentWorkers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for userID := range tradeChan {
-					executeTrade(userID)
-				}
-			}()
-		}
-
-		for _, userID := range userIDs {
-			tradeChan <- userID
-		}
-
-		close(tradeChan)
-		wg.Wait()
-	} else {
-		for _, userID := range userIDs {
-			executeTrade(userID)
-		}
-	}
-
-	waitUntilRedisStreamEmpty()
-	analyzePerformance()
+// ─── router setup ─────────────────────────────────────────────────────────────
+func apiRouter() http.Handler {
+    r := chi.NewRouter()
+    r.Get("/api/health", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+    r.Post("/api/trade", tradeHandler)
+    return r
 }
 
-func waitUntilRedisStreamEmpty() {
-	ctx := context.Background()
-	log.Println("⏳ Waiting for Redis stream to drain...")
+// ─── load tester (sends HTTP requests) ─────────────────────────────────────────
+func startLoadTest() {
+    ids := fetchAllUserIDs()
+    stop := time.After(testDuration)
 
-	for {
-		pending, err := redisClient.Client.XPending(ctx, "buy_stream", "kafka_workers").Result()
-		if err != nil {
-			log.Printf("❌ XPENDING error: %v", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		length, err := redisClient.Client.XLen(ctx, "buy_stream").Result()
-		if err != nil {
-			log.Printf("❌ XLEN error: %v", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		if pending.Count == 0 && length == 0 {
-			log.Println("✅ All Redis stream messages processed.")
-			break
-		}
-		log.Printf("⌛ Stream has length=%d, pending=%d; waiting...", length, pending.Count)
-		time.Sleep(1 * time.Second)
-	}
+    go func() {
+        client := http.Client{}
+        for {
+            for _, uid := range ids {
+                select {
+                case <-stop:
+                    return
+                default:
+                    tr := randomTrade(uid)
+                    body, _ := json.Marshal(tr)
+                    client.Post("http://localhost:8081/api/trade", "application/json", bytes.NewReader(body))
+                    atomic.AddInt64(&totalTrades, 1)
+                    for _, s := range tr.Stock { atomic.AddInt64(&totalStocksTraded, int64(s.Quantity)) }
+                }
+            }
+        }
+    }()
 }
 
-func analyzePerformance() {
-	tradeMutex.Lock()
-	defer tradeMutex.Unlock()
-
-	var tps float64
-	if len(tradeTimestamps) > 1 {
-		first := tradeTimestamps[0]
-		last := tradeTimestamps[len(tradeTimestamps)-1]
-		duration := last.Sub(first).Seconds()
-		if duration > 0 {
-			tps = float64(len(tradeTimestamps)) / duration
-		}
-	}
-
-	avgTime := time.Duration(0)
-	if totalTrades > 0 {
-		avgTime = totalTradeTime / time.Duration(totalTrades)
-	}
-
-	log.Println("===================================")
-	log.Printf("✅ Total Trades Sent: %d", totalTrades)
-	log.Printf("📦 Total Stocks Traded: %d", totalStocksTraded)
-	log.Printf("📊 TPS: %.2f", tps)
-	log.Printf("⏳ Avg Time to Enqueue: %v", avgTime)
-	log.Println("===================================")
-}
-
-func ensureRedisStream() {
-	ctx := context.Background()
-	err := redisClient.Client.XGroupCreateMkStream(ctx, "buy_stream", "kafka_workers", "$").Err()
-	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
-		log.Fatalf("Error creating consumer group: %v", err)
-	}
-	log.Println("✅ Redis Stream + 'kafka_workers' group ready!")
-}
-
+// ─── main ─────────────────────────────────────────────────────────────────────
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+    rand.Seed(time.Now().UnixNano())
+    runtime.GOMAXPROCS(runtime.NumCPU())
+    log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	db.InitDB()
-	redisClient.InitRedis()
-	ensureRedisStream()
+    db.InitDB()
+    redisClient.InitRedis()
+    redisStorage.InitRedis(redisClient.Client)
+    workers.EnsureRedisStream()
+    workers.StartKafkaProducer(5)
+    workers.StartKafkaConsumer(2, db.DB)
 
-	runtime.GOMAXPROCS(runtime.NumCPU())
+    // go workers.StartWorkerPool(workerCount, workers.TradeJobQueue)
 
-	workers.StartKafkaProducer(10)
-	workers.StartKafkaConsumer(10, db.DB)
+    // start background processing
+    go workers.StartWorkerPool(30, workers.TradeJobQueue)
 
-	rand.Seed(time.Now().UnixNano())
+    // start HTTP API
+    go func() {
+        log.Println("🌐 API listening on :8081")
+        if err := http.ListenAndServe(":8081", apiRouter()); err != nil {
+            log.Fatalf("server: %v", err)
+        }
+    }()
 
-	runTest(true)
+    // give server a moment to boot, then run load test
+    time.Sleep(time.Second)
+    startLoadTest()
 
-	log.Printf("✅ Done. currentWorkers=%d", currentWorkers)
+    // wait for test window to finish
+    time.Sleep(testDuration + 10*time.Second)
+
+    // report
+    log.Printf("✅ Trades: %d | Stocks: %d | TPS: %.1f", totalTrades, totalStocksTraded, float64(totalTrades)/testDuration.Seconds())
 }
+
+
+
+// package main
+
+// import (
+// 	"log"
+// 	"context"
+// 	"math/rand"
+// 	"runtime"
+// 	"sync/atomic"
+// 	"time"
+
+// 	"trading-service/db"
+// 	"trading-service/pkg/redisClient"
+// 	redisStorage "trading-service/redis"
+// 	trade "trading-service/services/trade"
+// 	workers "trading-service/services/workers"
+// )
+
+// var totalStocksTraded int64
+// var totalTrades int64
+// var totalTradeTime time.Duration
+// var tradeTimestamps []time.Time
+
+// const (
+// 	testDuration   = 21 * time.Second
+// 	currentWorkers = 30
+// )
+
+// var stockList = []string{
+// 	"AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "JNJ", "V", "PG",
+// 	"NVDA", "UNH", "HD", "MA", "DIS", "BAC", "VZ", "ADBE", "CMCSA", "NFLX",
+// 	"PFE", "T", "KO", "NKE", "MRK", "INTC", "CSCO", "XOM", "CVX", "ABT",
+// 	"ORCL", "CRM", "PEP", "IBM", "MCD", "WFC", "QCOM", "UPS", "COST", "MDT",
+// 	"CAT", "HON", "AMGN", "LLY", "PM", "BLK", "GE", "BA", "SBUX", "MMM",
+// 	"F", "GM", "ADP", "SPGI", "RTX", "TMO", "NOW", "BKNG", "MO", "ZTS",
+// 	"COP", "AXP", "SCHW", "CVS", "LOW", "DE", "MET", "PNC", "GS", "CI",
+// 	"TJX", "ICE", "PLD", "DUK", "SO", "ED", "OXY", "FDX", "MMC", "EXC",
+// 	"EQIX", "SLB", "GD", "APD", "NEE", "EOG", "LMT", "USB", "HCA", "BK",
+// 	"ITW", "AEP", "ECL", "PGR", "CSX", "CB", "MS", "TRV", "AON", "VLO",
+// }
+
+// func fetchAllUserIDs() []int {
+// 	rows, err := db.DB.Query("SELECT id FROM users")
+// 	if err != nil {
+// 		log.Fatalf("Failed to query users: %v", err)
+// 	}
+// 	defer rows.Close()
+
+// 	var userIDs []int
+// 	for rows.Next() {
+// 		var id int
+// 		rows.Scan(&id)
+// 		userIDs = append(userIDs, id)
+// 	}
+// 	return userIDs
+// }
+
+// func generateRandomTrade(userID int) trade.TradeRequest {
+// 	return trade.TradeRequest{
+// 		UserID: userID,
+// 		Action: "BUY",
+// 		Stock: []struct {
+// 			Symbol   string  `json:"symbol"`
+// 			Quantity float64 `json:"quantity"`
+// 			Price    float64 `json:"price"`
+// 		}{
+// 			{
+// 				Symbol:   stockList[rand.Intn(len(stockList))],
+// 				Quantity: float64(rand.Intn(5) + 1),
+// 				Price:    0,
+// 			},
+// 		},
+// 	}
+// }
+
+// func runTest() {
+// 	log.Printf("🚀 Running Load Test for %s...", testDuration)
+
+// 	userIDs := fetchAllUserIDs()
+// 	stop := time.After(testDuration)
+
+// 	go func() {
+// 		for {
+// 			for _, uid := range userIDs {
+// 				select {
+// 				case <-stop:
+// 					close(workers.TradeJobQueue)
+// 					return
+// 				default:
+// 					trade := generateRandomTrade(uid)
+// 					atomic.AddInt64(&totalTrades, 1)
+// 					for _, s := range trade.Stock {
+// 						atomic.AddInt64(&totalStocksTraded, int64(s.Quantity))
+// 					}
+// 					workers.TradeJobQueue <- workers.TradeJob{Trade: trade}
+// 				}
+// 			}
+// 		}
+// 	}()
+// }
+
+// func waitUntilRedisStreamEmpty() {
+// 		ctx := context.Background()
+
+// 		for {
+// 		pending, _ := redisClient.Client.XPending(ctx, "buy_stream", "kafka_workers").Result()
+// 		length, _ := redisClient.Client.XLen(ctx, "buy_stream").Result()
+// 		if pending.Count == 0 && length == 0 {
+// 			break
+// 		}
+// 		time.Sleep(500 * time.Millisecond)
+// 	}
+// }
+
+// func main() {
+// 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+// 	db.InitDB()
+// 	redisClient.InitRedis()
+// 	redisStorage.InitRedis(redisClient.Client)
+
+// 	workers.EnsureRedisStream()
+
+// 	runtime.GOMAXPROCS(runtime.NumCPU())
+// 	rand.Seed(time.Now().UnixNano())
+
+// 	workers.StartKafkaProducer(10)
+// 	workers.StartKafkaConsumer(10, db.DB)
+
+// 	// ✅ Use your in-memory trade workers
+// 	workers.StartWorkerPool(currentWorkers, workers.TradeJobQueue)
+
+// 	runTest()
+
+// 	// ✅ Wait until Redis stream is empty (Kafka already took everything)
+// 	waitUntilRedisStreamEmpty()
+
+// 	// ✅ Optional: small buffer wait to allow final SQL flush
+// 	time.Sleep(2 * time.Second)
+
+// 	log.Println("===================================")
+// 	log.Printf("✅ Total Trades Sent: %d", totalTrades)
+// 	log.Printf("📦 Total Stocks Traded: %d", totalStocksTraded)
+// 	log.Printf("📊 TPS: %.2f", float64(totalTrades)/testDuration.Seconds())
+// 	log.Println("===================================")
+// }
+
+// package main
+
+// import (
+// 	"context"
+// 	"log"
+// 	"math/rand"
+// 	"runtime"
+// 	"sync"
+// 	"sync/atomic"
+// 	"time"
+
+// 	"trading-service/db"
+// 	"trading-service/pkg/redisClient"
+// 	trade "trading-service/services/trade"
+// 	workers "trading-service/services/workers"
+// )
+
+// var totalStocksTraded int64 // 🔢 total quantity of stocks traded
+
+// var (
+// 	// Worker concurrency params
+// 	baseWorkers     = runtime.NumCPU() * 2
+// 	workerIncrement = 4
+// 	maxWorkers      = 200
+// 	currentWorkers  = 30
+
+// 	// Performance tracking
+// 	totalTrades     int64
+// 	totalTradeTime  time.Duration
+// 	tradeMutex      sync.Mutex
+// 	tradeTimestamps []time.Time
+// )
+
+// // Modified: Changed test duration from 2 seconds to 5 seconds
+// const testDuration = 1 * time.Second
+
+// var stockList = []string{
+// 	"AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "JNJ", "V", "PG",
+// 	"NVDA", "UNH", "HD", "MA", "DIS", "BAC", "VZ", "ADBE", "CMCSA", "NFLX",
+// 	"PFE", "T", "KO", "NKE", "MRK", "INTC", "CSCO", "XOM", "CVX", "ABT",
+// 	"ORCL", "CRM", "PEP", "IBM", "MCD", "WFC", "QCOM", "UPS", "COST", "MDT",
+// 	"CAT", "HON", "AMGN", "LLY", "PM", "BLK", "GE", "BA", "SBUX", "MMM",
+// 	"F", "GM", "ADP", "SPGI", "RTX", "TMO", "NOW", "BKNG", "MO", "ZTS",
+// 	"COP", "AXP", "SCHW", "CVS", "LOW", "DE", "MET", "PNC", "GS", "CI",
+// 	"TJX", "ICE", "PLD", "DUK", "SO", "ED", "OXY", "FDX", "MMC", "EXC",
+// 	"EQIX", "SLB", "GD", "APD", "NEE", "EOG", "LMT", "USB", "HCA", "BK",
+// 	"ITW", "AEP", "ECL", "PGR", "CSX", "CB", "MS", "TRV", "AON", "VLO",
+// }
+
+// // ✅ Fetch real user IDs from the DB
+// func fetchAllUserIDs() []int {
+// 	rows, err := db.DB.Query("SELECT id FROM users")
+// 	if err != nil {
+// 		log.Fatalf("Failed to query users: %v", err)
+// 	}
+// 	defer rows.Close()
+
+// 	var userIDs []int
+// 	for rows.Next() {
+// 		var id int
+// 		if err := rows.Scan(&id); err != nil {
+// 			log.Printf("Failed to scan row: %v", err)
+// 			continue
+// 		}
+// 		userIDs = append(userIDs, id)
+// 	}
+
+// 	if err := rows.Err(); err != nil {
+// 		log.Fatalf("Error iterating rows: %v", err)
+// 	}
+
+// 	log.Printf("✅ Loaded %d user IDs from database", len(userIDs))
+// 	return userIDs
+// }
+
+// func generateRandomTrade(userID int) trade.TradeRequest {
+// 	return trade.TradeRequest{
+// 		UserID: userID,
+// 		Action: "BUY",
+// 		Stock: []struct {
+// 			Symbol   string  `json:"symbol"`
+// 			Quantity float64 `json:"quantity"`
+// 			Price    float64 `json:"price"`
+// 		}{
+// 			{
+// 				Symbol:   stockList[rand.Intn(len(stockList))],
+// 				Quantity: float64(rand.Intn(5) + 1),
+// 				Price:    100.0,
+// 			},
+// 		},
+// 	}
+// }
+
+// var inFlightUsers sync.Map
+
+// func executeTrade(userID int) {
+// 	if _, exists := inFlightUsers.LoadOrStore(userID, struct{}{}); exists {
+// 		return
+// 	}
+// 	defer inFlightUsers.Delete(userID)
+
+// 	tradeData := generateRandomTrade(userID)
+
+// 	start := time.Now()
+// 	balance := 100000.0
+// 	totalCost := tradeData.Stock[0].Price * tradeData.Stock[0].Quantity
+
+// 	trade.ExecuteBuy(context.Background(), tradeData, balance, totalCost)
+
+// 	elapsed := time.Since(start)
+
+// 	tradeMutex.Lock()
+// 	totalTradeTime += elapsed
+// 	tradeTimestamps = append(tradeTimestamps, time.Now())
+// 	tradeMutex.Unlock()
+
+// 	atomic.AddInt64(&totalTrades, 1)
+// 	for _, s := range tradeData.Stock {
+// 		atomic.AddInt64(&totalStocksTraded, int64(s.Quantity))
+// 	}
+// }
+
+// // Modified: Updated runTest to run for a fixed duration instead of fixed number of users
+// func runTest(concurrent bool) {
+// 	log.Printf("🚀 Running Load Test | concurrent=%t | workers=%d | duration=%s", concurrent, currentWorkers, testDuration)
+// 	var wg sync.WaitGroup
+
+// 	userIDs := fetchAllUserIDs()
+// 	// Create a stopChan to signal workers to stop after test duration
+// 	stopChan := make(chan struct{})
+	
+// 	// Start a timer to close stopChan after test duration
+// 	go func() {
+// 		time.Sleep(testDuration)
+// 		close(stopChan)
+// 		log.Printf("⏰ Test duration (%s) reached, stopping new trades...", testDuration)
+// 	}()
+	
+// 	if concurrent {
+// 		tradeChan := make(chan int, 1000)
+		
+// 		// Start worker goroutines
+// 		for i := 0; i < currentWorkers; i++ {
+// 			wg.Add(1)
+// 			go func() {
+// 				defer wg.Done()
+// 				for userID := range tradeChan {
+// 					executeTrade(userID)
+// 				}
+// 			}()
+// 		}
+		
+// 		// Feed user IDs to tradeChan until stopChan is closed
+// 		go func() {
+// 			defer close(tradeChan)
+			
+// 			// Loop continuously sending user IDs until stop signal
+// 			for {
+// 				select {
+// 				case <-stopChan:
+// 					return
+// 				default:
+// 					// Continuously cycle through all valid user IDs
+// 					for _, userID := range userIDs {
+// 						if userID >= 1 && userID <= 7000 {
+// 							select {
+// 							case <-stopChan:
+// 								return
+// 							case tradeChan <- userID:
+// 								// Successfully sent user ID to trade channel
+// 							}
+// 						}
+// 					}
+// 				}
+// 			}
+// 		}()
+		
+// 		// Wait for all worker goroutines to finish
+// 		wg.Wait()
+// 	} else {
+// 		// Non-concurrent version with time limit
+// 		startTime := time.Now()
+// 		for time.Since(startTime) < testDuration {
+// 			for _, userID := range userIDs {
+// 				if userID >= 1 && userID <= 7000 {
+// 					executeTrade(userID)
+					
+// 					// Check if test duration has elapsed
+// 					if time.Since(startTime) >= testDuration {
+// 						break
+// 					}
+// 				}
+// 			}
+// 		}
+// 	}
+
+// 	waitUntilRedisStreamEmpty()
+// 	analyzePerformance()
+// }
+
+// func waitUntilRedisStreamEmpty() {
+// 	ctx := context.Background()
+// 	log.Println("⏳ Waiting for Redis stream to drain...")
+
+// 	for {
+// 		pending, err := redisClient.Client.XPending(ctx, "buy_stream", "kafka_workers").Result()
+// 		if err != nil {
+// 			log.Printf("❌ XPENDING error: %v", err)
+// 			time.Sleep(1 * time.Second)
+// 			continue
+// 		}
+// 		length, err := redisClient.Client.XLen(ctx, "buy_stream").Result()
+// 		if err != nil {
+// 			log.Printf("❌ XLEN error: %v", err)
+// 			time.Sleep(1 * time.Second)
+// 			continue
+// 		}
+
+// 		if pending.Count == 0 && length == 0 {
+// 			log.Println("✅ All Redis stream messages processed.")
+// 			break
+// 		}
+// 		log.Printf("⌛ Stream has length=%d, pending=%d; waiting...", length, pending.Count)
+// 		time.Sleep(1 * time.Second)
+// 	}
+// }
+
+// func analyzePerformance() {
+// 	tradeMutex.Lock()
+// 	defer tradeMutex.Unlock()
+
+// 	var tps float64
+// 	if len(tradeTimestamps) > 1 {
+// 		first := tradeTimestamps[0]
+// 		last := tradeTimestamps[len(tradeTimestamps)-1]
+// 		duration := last.Sub(first).Seconds()
+// 		if duration > 0 {
+// 			tps = float64(len(tradeTimestamps)) / duration
+// 		}
+// 	}
+
+// 	avgTime := time.Duration(0)
+// 	if totalTrades > 0 {
+// 		avgTime = totalTradeTime / time.Duration(totalTrades)
+// 	}
+
+// 	log.Println("===================================")
+// 	log.Printf("✅ Total Trades Sent: %d", totalTrades)
+// 	log.Printf("📦 Total Stocks Traded: %d", totalStocksTraded)
+// 	log.Printf("📊 TPS: %.2f", tps)
+// 	log.Printf("⏳ Avg Time to Enqueue: %v", avgTime)
+// 	log.Println("===================================")
+// }
+
+// func ensureRedisStream() {
+// 	ctx := context.Background()
+// 	err := redisClient.Client.XGroupCreateMkStream(ctx, "buy_stream", "kafka_workers", "$").Err()
+// 	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
+// 		log.Fatalf("Error creating consumer group: %v", err)
+// 	}
+// 	log.Println("✅ Redis Stream + 'kafka_workers' group ready!")
+// }
+
+// func main() {
+// 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+// 	db.InitDB()
+// 	redisClient.InitRedis()
+// 	ensureRedisStream()
+
+// 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+// 	workers.StartKafkaProducer(10)
+// 	workers.StartKafkaConsumer(10, db.DB)
+
+// 	rand.Seed(time.Now().UnixNano())
+
+// 	runTest(true)
+// 	time.Sleep(5*30*time.Second)
+// 	log.Printf("✅ Done. currentWorkers=%d", currentWorkers)
+// }
+// package main
+
+// import (
+// 	"context"
+// 	"log"
+// 	"math/rand"
+// 	"runtime"
+// 	"sync"
+// 	"sync/atomic"
+// 	"time"
+
+// 	"trading-service/db"
+// 	"trading-service/pkg/redisClient"
+// 	trade "trading-service/services/trade"
+// 	workers "trading-service/services/workers"
+// )
+
+// var totalStocksTraded int64 // 🔢 total quantity of stocks traded
+
+// var (
+// 	// Worker concurrency params
+// 	baseWorkers     = runtime.NumCPU() * 2
+// 	workerIncrement = 4
+// 	maxWorkers      = 200
+// 	currentWorkers  = 30
+
+// 	// Performance tracking
+// 	totalTrades     int64
+// 	totalTradeTime  time.Duration
+// 	tradeMutex      sync.Mutex
+// 	tradeTimestamps []time.Time
+// )
+
+// const testDuration = 2 * time.Second
+
+// var stockList = []string{
+// 	"AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "JNJ", "V", "PG",
+// 	"NVDA", "UNH", "HD", "MA", "DIS", "BAC", "VZ", "ADBE", "CMCSA", "NFLX",
+// 	"PFE", "T", "KO", "NKE", "MRK", "INTC", "CSCO", "XOM", "CVX", "ABT",
+// 	"ORCL", "CRM", "PEP", "IBM", "MCD", "WFC", "QCOM", "UPS", "COST", "MDT",
+// 	"CAT", "HON", "AMGN", "LLY", "PM", "BLK", "GE", "BA", "SBUX", "MMM",
+// 	"F", "GM", "ADP", "SPGI", "RTX", "TMO", "NOW", "BKNG", "MO", "ZTS",
+// 	"COP", "AXP", "SCHW", "CVS", "LOW", "DE", "MET", "PNC", "GS", "CI",
+// 	"TJX", "ICE", "PLD", "DUK", "SO", "ED", "OXY", "FDX", "MMC", "EXC",
+// 	"EQIX", "SLB", "GD", "APD", "NEE", "EOG", "LMT", "USB", "HCA", "BK",
+// 	"ITW", "AEP", "ECL", "PGR", "CSX", "CB", "MS", "TRV", "AON", "VLO",
+// }
+
+// // ✅ Fetch real user IDs from the DB
+// func fetchAllUserIDs() []int {
+// 	rows, err := db.DB.Query("SELECT id FROM users")
+// 	if err != nil {
+// 		log.Fatalf("Failed to query users: %v", err)
+// 	}
+// 	defer rows.Close()
+
+// 	var userIDs []int
+// 	for rows.Next() {
+// 		var id int
+// 		if err := rows.Scan(&id); err != nil {
+// 			log.Printf("Failed to scan row: %v", err)
+// 			continue
+// 		}
+// 		userIDs = append(userIDs, id)
+// 	}
+
+// 	if err := rows.Err(); err != nil {
+// 		log.Fatalf("Error iterating rows: %v", err)
+// 	}
+
+// 	log.Printf("✅ Loaded %d user IDs from database", len(userIDs))
+// 	return userIDs
+// }
+
+// func generateRandomTrade(userID int) trade.TradeRequest {
+// 	return trade.TradeRequest{
+// 		UserID: userID,
+// 		Action: "BUY",
+// 		Stock: []struct {
+// 			Symbol   string  `json:"symbol"`
+// 			Quantity float64 `json:"quantity"`
+// 			Price    float64 `json:"price"`
+// 		}{
+// 			{
+// 				Symbol:   stockList[rand.Intn(len(stockList))],
+// 				Quantity: float64(rand.Intn(5) + 1),
+// 				Price:    100.0,
+// 			},
+// 		},
+// 	}
+// }
+
+// var inFlightUsers sync.Map
+
+// func executeTrade(userID int) {
+// 	if _, exists := inFlightUsers.LoadOrStore(userID, struct{}{}); exists {
+// 		return
+// 	}
+// 	defer inFlightUsers.Delete(userID)
+
+// 	tradeData := generateRandomTrade(userID)
+
+// 	start := time.Now()
+// 	balance := 100000.0
+// 	totalCost := tradeData.Stock[0].Price * tradeData.Stock[0].Quantity
+
+// 	trade.ExecuteBuy(context.Background(), tradeData, balance, totalCost)
+
+// 	elapsed := time.Since(start)
+
+// 	tradeMutex.Lock()
+// 	totalTradeTime += elapsed
+// 	tradeTimestamps = append(tradeTimestamps, time.Now())
+// 	tradeMutex.Unlock()
+
+// 	atomic.AddInt64(&totalTrades, 1)
+// 	for _, s := range tradeData.Stock {
+// 		atomic.AddInt64(&totalStocksTraded, int64(s.Quantity))
+// 	}
+// }
+// func runTest(concurrent bool) {
+// 	log.Printf("🚀 Running Load Test | concurrent=%t | workers=%d", concurrent, currentWorkers)
+// 	var wg sync.WaitGroup
+
+// 	userIDs := fetchAllUserIDs()
+
+// 	if concurrent {
+// 		tradeChan := make(chan int, 1000)
+// 		for i := 0; i < currentWorkers; i++ {
+// 			wg.Add(1)
+// 			go func() {
+// 				defer wg.Done()
+// 				for userID := range tradeChan {
+// 					executeTrade(userID)
+// 				}
+// 			}()
+// 		}
+
+// 		for _, userID := range userIDs {
+// 			if userID >= 1 && userID <= 7000 {
+// 				tradeChan <- userID
+// 			}
+// 		}
+
+// 		close(tradeChan)
+// 		wg.Wait()
+// 	} else {
+// 		for _, userID := range userIDs {
+// 			if userID >= 1 && userID <= 7000{
+// 				executeTrade(userID)
+// 			}
+// 		}
+// 	}
+
+// 	waitUntilRedisStreamEmpty()
+// 	analyzePerformance()
+// }
+
+// func waitUntilRedisStreamEmpty() {
+// 	ctx := context.Background()
+// 	log.Println("⏳ Waiting for Redis stream to drain...")
+
+// 	for {
+// 		pending, err := redisClient.Client.XPending(ctx, "buy_stream", "kafka_workers").Result()
+// 		if err != nil {
+// 			log.Printf("❌ XPENDING error: %v", err)
+// 			time.Sleep(1 * time.Second)
+// 			continue
+// 		}
+// 		length, err := redisClient.Client.XLen(ctx, "buy_stream").Result()
+// 		if err != nil {
+// 			log.Printf("❌ XLEN error: %v", err)
+// 			time.Sleep(1 * time.Second)
+// 			continue
+// 		}
+
+// 		if pending.Count == 0 && length == 0 {
+// 			log.Println("✅ All Redis stream messages processed.")
+// 			break
+// 		}
+// 		log.Printf("⌛ Stream has length=%d, pending=%d; waiting...", length, pending.Count)
+// 		time.Sleep(1 * time.Second)
+// 	}
+// }
+
+// func analyzePerformance() {
+// 	tradeMutex.Lock()
+// 	defer tradeMutex.Unlock()
+
+// 	var tps float64
+// 	if len(tradeTimestamps) > 1 {
+// 		first := tradeTimestamps[0]
+// 		last := tradeTimestamps[len(tradeTimestamps)-1]
+// 		duration := last.Sub(first).Seconds()
+// 		if duration > 0 {
+// 			tps = float64(len(tradeTimestamps)) / duration
+// 		}
+// 	}
+
+// 	avgTime := time.Duration(0)
+// 	if totalTrades > 0 {
+// 		avgTime = totalTradeTime / time.Duration(totalTrades)
+// 	}
+
+// 	log.Println("===================================")
+// 	log.Printf("✅ Total Trades Sent: %d", totalTrades)
+// 	log.Printf("📦 Total Stocks Traded: %d", totalStocksTraded)
+// 	log.Printf("📊 TPS: %.2f", tps)
+// 	log.Printf("⏳ Avg Time to Enqueue: %v", avgTime)
+// 	log.Println("===================================")
+// }
+
+// func ensureRedisStream() {
+// 	ctx := context.Background()
+// 	err := redisClient.Client.XGroupCreateMkStream(ctx, "buy_stream", "kafka_workers", "$").Err()
+// 	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
+// 		log.Fatalf("Error creating consumer group: %v", err)
+// 	}
+// 	log.Println("✅ Redis Stream + 'kafka_workers' group ready!")
+// }
+
+// func main() {
+// 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+// 	db.InitDB()
+// 	redisClient.InitRedis()
+// 	ensureRedisStream()
+
+// 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+// 	workers.StartKafkaProducer(10)
+// 	workers.StartKafkaConsumer(10, db.DB)
+
+// 	rand.Seed(time.Now().UnixNano())
+
+// 	runTest(true)
+
+// 	log.Printf("✅ Done. currentWorkers=%d", currentWorkers)
+// }
 
 // package main
 

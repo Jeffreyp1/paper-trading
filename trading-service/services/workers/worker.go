@@ -16,6 +16,7 @@ import (
 type TradeJob struct {
 	Trade trade_service.TradeRequest
 }
+var TradeJobQueue = make(chan TradeJob, 10000)
 
 func TradeWorker(id int, jobs <-chan TradeJob, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -39,10 +40,11 @@ func TradeWorker(id int, jobs <-chan TradeJob, wg *sync.WaitGroup) {
 			}
 			totalCost += stockPrice * stock.Quantity
 		}
-		if totalCost < balance {
+		if totalCost <= balance {
 			trade_service.ExecuteBuy(ctx, tradeData, balance, totalCost)
 		} else {
-			log.Printf("Insufficient funds", http.StatusForbidden)
+			log.Print(totalCost, balance, tradeData.UserID)
+			log.Printf("Insufficient funds",  http.StatusForbidden)
 			continue
 		}
 	}
@@ -57,9 +59,12 @@ func StartWorkerPool(workerCount int, jobs chan TradeJob) {
 		wg.Add(1)
 		go TradeWorker(i, jobs, &wg)
 	}
-
-	go func() {
-		wg.Wait()
-		close(jobs)
-	}()
+}
+func EnsureRedisStream() {
+	ctx := context.Background()
+	err := redisClient.Client.XGroupCreateMkStream(ctx, "buy_stream", "kafka_workers", "$").Err()
+	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
+		log.Fatalf("Error creating consumer group: %v", err)
+	}
+	log.Println("✅ Redis Stream + 'kafka_workers' group ready!")
 }

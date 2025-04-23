@@ -168,7 +168,11 @@ func processTrade(workerId int, db *sql.DB) {
 				_, trimErr := redisClient.Client.XTrimMinID(context.Background(), "buy_stream", jobID).Result()
 				if trimErr != nil {
 					log.Println("❌ Error trimming Redis stream:", trimErr)
+				}else{
+					log.Println("Successfully trimmed!")
 				}
+				// redisClient.Client.XDel(context.Background(), "buy_stream", jobID)
+
 				// log.Printf("Trade %s acknowledged", jobID)
 				// redisClient.Client.XTrimMaxLen(context.Background(), "buy_stream", 200000).Result()
 				// if trimErr != nil {

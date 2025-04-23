@@ -34,7 +34,7 @@ func ExecuteBuy(ctx context.Context, trade TradeRequest, balance float64, totalC
 	}
 	pipeline := redisClient.Client.TxPipeline()
 	pipeline.HSet(ctx, "user_balance", fmt.Sprint(trade.UserID), balance-totalCost)
-	stock, err := pipeline.XAdd(ctx, &redis.XAddArgs{
+	_, err = pipeline.XAdd(ctx, &redis.XAddArgs{
 		Stream: "buy_stream",
 		Values: map[string]interface{}{
 			"user_id": trade.UserID,
@@ -47,12 +47,10 @@ func ExecuteBuy(ctx context.Context, trade TradeRequest, balance float64, totalC
 		log.Fatalf("Failed to push trade to Redis Stream: %v", err)
 		redisClient.Client.HSet(ctx, "user_balance", fmt.Sprint(trade.UserID), balance)
 		return
-	} else {
-		fmt.Println(stock)
-	}
+	} 
 	_, err = pipeline.Exec(ctx)
 	if err != nil {
 		log.Fatalf("Failed to execute pipeline: %v", err)
 	}
-	log.Println("✅ Trade successfully added to Redis Stream!")
+	// log.Println("✅ Trade successfully added to Redis Stream!")
 }
