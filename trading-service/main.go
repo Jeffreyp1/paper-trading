@@ -28,8 +28,8 @@ var (
 )
 
 const (
-    testDuration   = 5 * time.Second
-    workerCount    = 30
+    testDuration   = 5 * 60 * time.Second
+    workerCount    = 20
 )
 
 // ─── random stock list (trimmed for brevity) ───────────────────────────────────
@@ -117,6 +117,52 @@ func startLoadTest() {
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────
+// func main() {
+//     rand.Seed(time.Now().UnixNano())
+//     runtime.GOMAXPROCS(runtime.NumCPU())
+//     log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+//     db.InitDB()
+//     redisClient.InitRedis()
+//     redisStorage.InitRedis(redisClient.Client)
+//     workers.EnsureRedisStream()
+//     workers.StartKafkaProducer(5)
+//     workers.StartKafkaConsumer(2, db.DB)
+
+//     // go workers.StartWorkerPool(workerCount, workers.TradeJobQueue)
+
+//     // start background processing
+//     go workers.StartWorkerPool(30, workers.TradeJobQueue)
+
+//     // start HTTP API
+//     go func() {
+//         log.Println("🌐 API listening on :8081")
+//         if err := http.ListenAndServe(":8081", apiRouter()); err != nil {
+//             log.Fatalf("server: %v", err)
+//         }
+//     }()
+
+//     // give server a moment to boot, then run load test
+//     time.Sleep(time.Second)
+//     startLoadTest()
+
+//     // wait for test window to finish
+//     time.Sleep(testDuration + 10*time.Second)
+
+//     // report
+//     log.Printf("✅ Trades: %d | Stocks: %d | TPS: %.1f", totalTrades, totalStocksTraded, float64(totalTrades)/testDuration.Seconds())
+// }
+
+func getExecutedTradeCountFromDB() int {
+	row := db.DB.QueryRow("SELECT COUNT(*) FROM trades")
+	var count int
+	if err := row.Scan(&count); err != nil {
+		log.Printf("❌ Failed to count trades in DB: %v", err)
+		return -1
+	}
+	return count
+}
+// ─── main ─────────────────────────────────────────────────────────────────────
 func main() {
     rand.Seed(time.Now().UnixNano())
     runtime.GOMAXPROCS(runtime.NumCPU())
@@ -125,9 +171,10 @@ func main() {
     db.InitDB()
     redisClient.InitRedis()
     redisStorage.InitRedis(redisClient.Client)
+	oldTrades := getExecutedTradeCountFromDB()
     workers.EnsureRedisStream()
-    workers.StartKafkaProducer(5)
-    workers.StartKafkaConsumer(2, db.DB)
+    workers.StartKafkaProducer(2)
+    workers.StartKafkaConsumer(15, db.DB)
 
     // go workers.StartWorkerPool(workerCount, workers.TradeJobQueue)
 
@@ -147,13 +194,20 @@ func main() {
     startLoadTest()
 
     // wait for test window to finish
-    time.Sleep(testDuration + 10*time.Second)
+    time.Sleep(testDuration + 20*time.Second)
 
     // report
-    log.Printf("✅ Trades: %d | Stocks: %d | TPS: %.1f", totalTrades, totalStocksTraded, float64(totalTrades)/testDuration.Seconds())
+	actualTrades := getExecutedTradeCountFromDB()
+	log.Println("===================================")
+	log.Printf("✅ Total Trades Sent: %d", totalTrades)
+	log.Printf("📦 Total Stocks Traded: %d", totalStocksTraded)
+	log.Printf("📊 TPS: %.2f", float64(totalTrades)/testDuration.Seconds())
+	log.Printf("🧾 Actual Trades Stored in DB: %d",actualTrades)
+	log.Printf("🧾 Before Trades Stored in DB: %d",oldTrades)
+	log.Printf("🔍 Total trades done %d", actualTrades-oldTrades)
+	log.Println("===================================")
+    // log.Printf("✅ Trades: %d | Stocks: %d | TPS: %.1f", totalTrades, totalStocksTraded, float64(totalTrades)/testDuration.Seconds())
 }
-
-
 
 // package main
 
@@ -334,7 +388,7 @@ func main() {
 // )
 
 // // Modified: Changed test duration from 2 seconds to 5 seconds
-// const testDuration = 1 * time.Second
+// const testDuration = 5 * time.Second
 
 // var stockList = []string{
 // 	"AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "JNJ", "V", "PG",
@@ -562,11 +616,20 @@ func main() {
 // 	}
 // 	log.Println("✅ Redis Stream + 'kafka_workers' group ready!")
 // }
-
+// func getExecutedTradeCountFromDB() int {
+// 	row := db.DB.QueryRow("SELECT COUNT(*) FROM trades")
+// 	var count int
+// 	if err := row.Scan(&count); err != nil {
+// 		log.Printf("❌ Failed to count trades in DB: %v", err)
+// 		return -1
+// 	}
+// 	return count
+// }
 // func main() {
 // 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 // 	db.InitDB()
+// 	oldTrades := getExecutedTradeCountFromDB()
 // 	redisClient.InitRedis()
 // 	ensureRedisStream()
 
@@ -578,8 +641,16 @@ func main() {
 // 	rand.Seed(time.Now().UnixNano())
 
 // 	runTest(true)
-// 	time.Sleep(5*30*time.Second)
-// 	log.Printf("✅ Done. currentWorkers=%d", currentWorkers)
+// 	time.Sleep(30*time.Second)
+// 	actualTrades := getExecutedTradeCountFromDB()
+// 	log.Println("===================================")
+// 	log.Printf("✅ Total Trades Sent: %d", totalTrades)
+// 	log.Printf("📦 Total Stocks Traded: %d", totalStocksTraded)
+// 	log.Printf("📊 TPS: %.2f", float64(totalTrades)/testDuration.Seconds())
+// 	log.Printf("🧾 Actual Trades Stored in DB: %d", actualTrades)
+// 	log.Printf("🔍 Difference (Lost Trades): %d", actualTrades-oldTrades)
+// 	log.Println("===================================")
+
 // }
 // package main
 

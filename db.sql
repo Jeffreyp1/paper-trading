@@ -54,7 +54,6 @@ CREATE TABLE IF NOT EXISTS positions (
     CONSTRAINT unique_user_stock UNIQUE (user_id, symbol)
 );
 
-
 -- ==============================
 -- 5) Orders Table (For Advanced Order Management)
 -- ==============================

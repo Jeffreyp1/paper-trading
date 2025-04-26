@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"trading-service/db"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
@@ -24,8 +25,8 @@ type Trade struct {
 }
 
 var (
-	batchSize     = 1000
-	batchTimeout  = 1 * time.Second
+	batchSize     = 2000
+	batchTimeout  = 50 * time.Millisecond
 	consumerTopic = "trade_events"
 )
 
@@ -212,6 +213,16 @@ func StartKafkaConsumer(workerCount int, db *sql.DB) {
 		}(i)
 	}
 }
+func getExecutedTradeCountFromDB() int {
+	row := db.DB.QueryRow("SELECT COUNT(*) FROM trades")
+	var count int
+	if err := row.Scan(&count); err != nil {
+		log.Printf("❌ Failed to count trades in DB: %v", err)
+		return -1
+	}
+	return count
+}
+
 
 // func updateBalances(db *sql.DB, trades []Trade) error {
 // 	if len(trades) == 0 {

@@ -78,9 +78,9 @@ async function updateLeaderboard() {
   }
 }
 await storeBalanceToRedis();
-setInterval(async()=>{await storeBalanceToRedis()}, 60000)
+setInterval(async()=>{await storeBalanceToRedis()}, 60000 * 10)
 await storePositionsToRedis();
-setInterval(async()=>{await storePositionsToRedis()}, 60000)
+setInterval(async()=>{await storePositionsToRedis()}, 60000 * 10)
 await fetchStockPrices();
 setInterval(async()=>{await fetchStockPrices()}, 360000); 
 await updateLeaderboard();

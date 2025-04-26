@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"strconv"
-	"time"
 	redis "github.com/redis/go-redis/v9"
 	redisClient "trading-service/pkg/redisClient"
 
@@ -28,6 +27,8 @@ func initKafkaProducer() {
 	var err error
 	producer, err = kafka.NewProducer(&kafka.ConfigMap{
 		"bootstrap.servers": "localhost:9092", // update if needed
+		"queue.buffering.max.messages": 8000000, // default is 100000
+		"queue.buffering.max.kbytes": 8048576,   // 1GB
 	})
 	if err != nil {
 		log.Fatalf("Failed to create Kafka producer: %v", err)
@@ -44,7 +45,6 @@ func processRedisStream(workerId int) error {
 			Consumer: fmt.Sprintf("redisConsumer-%d", workerId),
 			Streams:  []string{"buy_stream", ">"},
 			Count:    10,
-			Block:    5 * time.Second,
 		}).Result()
 		// log.Printf("reading message now!")
 		if err != nil {
