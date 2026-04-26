@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Paper Trading</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <nav>
+    <div class="brand">Paper Trading</div>
+    <div class="links">
+      <a href="/" class="active">Dashboard</a>
+      <a href="/perf.html">Performance</a>
+      <a href="#" id="logout-link" class="hidden">Logout</a>
+    </div>
+  </nav>
+
+  <div class="container">
+    <!-- Auth view -->
+    <section id="auth-view" class="grid-2">
+      <div class="panel">
+        <h2>Login</h2>
+        <div class="row"><label>Email</label><input id="login-email" type="email" placeholder="user@example.com" /></div>
+        <div class="row"><label>Password</label><input id="login-password" type="password" /></div>
+        <button id="login-btn">Login</button>
+        <div id="login-msg" class="error"></div>
+      </div>
+      <div class="panel">
+        <h2>Register</h2>
+        <div class="row"><label>Username</label><input id="reg-username" type="text" /></div>
+        <div class="row"><label>Email</label><input id="reg-email" type="email" /></div>
+        <div class="row"><label>Password</label><input id="reg-password" type="password" /></div>
+        <button id="register-btn" class="secondary">Create account</button>
+        <div id="register-msg" class="success"></div>
+        <p class="tag">New users start with $10,000.</p>
+      </div>
+    </section>
+
+    <!-- Dashboard view -->
+    <section id="dash-view" class="hidden">
+      <div class="kpi" style="margin-bottom: 16px">
+        <div class="card"><div class="label">Account</div><div class="value" id="kpi-email">—</div></div>
+        <div class="card"><div class="label">Cash</div><div class="value" id="kpi-cash">—</div></div>
+        <div class="card"><div class="label">Portfolio</div><div class="value" id="kpi-value">—</div></div>
+        <div class="card"><div class="label">ROI</div><div class="value" id="kpi-roi">—</div></div>
+      </div>
+
+      <div class="grid">
+        <div class="col">
+          <div class="panel">
+            <h2>Live Stocks <span id="ws-status" class="tag">connecting…</span></h2>
+            <div class="scroll">
+              <table>
+                <thead><tr><th>Symbol</th><th style="text-align:right">Price</th></tr></thead>
+                <tbody id="stocks-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="panel">
+            <h2>Trade</h2>
+            <div class="row"><label>Symbol</label>
+              <select id="trade-symbol"></select>
+            </div>
+            <div class="row"><label>Quantity</label>
+              <input id="trade-quantity" type="number" min="1" value="1" />
+            </div>
+            <div class="row"><label>Action</label>
+              <select id="trade-action">
+                <option value="buy">Buy</option>
+                <option value="sell">Sell</option>
+              </select>
+            </div>
+            <button id="trade-btn">Submit Trade</button>
+            <div id="trade-msg" class="error"></div>
+          </div>
+
+          <div class="panel">
+            <h2>Holdings</h2>
+            <div class="scroll">
+              <table>
+                <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Price</th></tr></thead>
+                <tbody id="holdings-tbody"></tbody>
+              </table>
+            </div>
+            <button id="refresh-holdings" class="secondary" style="margin-top:8px">Refresh</button>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="panel">
+            <h2>Trade History</h2>
+            <div class="scroll">
+              <table>
+                <thead><tr><th>Symbol</th><th>Type</th><th>Qty</th><th>Price</th></tr></thead>
+                <tbody id="history-tbody"></tbody>
+              </table>
+            </div>
+            <button id="refresh-history" class="secondary" style="margin-top:8px">Refresh</button>
+          </div>
+
+          <div class="panel">
+            <h2>Leaderboard (Top 10)</h2>
+            <div class="scroll">
+              <table>
+                <thead><tr><th>#</th><th>User</th><th style="text-align:right">Net Worth</th></tr></thead>
+                <tbody id="leaderboard-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

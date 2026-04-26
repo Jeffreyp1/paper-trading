@@ -10,8 +10,8 @@ const PORT = 3000
 import routes from "./routes/v1/index.js"
 
 app.use(express.json());
+app.use(express.static('public'));
 app.use('/api/v1', routes);
-app.use(express.json())
 async function updateLeaderboard() {
   try {
       const start = Date.now()

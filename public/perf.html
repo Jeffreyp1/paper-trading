@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Performance Test</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <nav>
+    <div class="brand">Paper Trading</div>
+    <div class="links">
+      <a href="/">Dashboard</a>
+      <a href="/perf.html" class="active">Performance</a>
+    </div>
+  </nav>
+
+  <div class="container">
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Test Configuration</h2>
+        <div class="row"><label>Endpoint</label>
+          <select id="cfg-endpoint">
+            <option value="trade">POST /api/v1/trading/trade</option>
+            <option value="portfolio">GET  /api/v1/analytics/portfolio</option>
+            <option value="holdings">GET  /api/v1/analytics/holdings</option>
+            <option value="leaderboard">GET  /api/v1/analytics/leaderboard</option>
+            <option value="trade_history">GET  /api/v1/trading/trade_history</option>
+          </select>
+        </div>
+        <div class="row"><label>Total requests</label><input id="cfg-total" type="number" min="1" value="500" /></div>
+        <div class="row"><label>Concurrency</label><input id="cfg-concurrency" type="number" min="1" value="50" /></div>
+        <div id="trade-cfg">
+          <div class="row"><label>Symbol</label><select id="cfg-symbol"></select></div>
+          <div class="row"><label>Quantity</label><input id="cfg-qty" type="number" min="1" value="1" /></div>
+          <div class="row"><label>Action</label>
+            <select id="cfg-action">
+              <option value="buy">buy</option>
+              <option value="sell">sell</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="run-btn">Run Test</button>
+          <button id="stop-btn" class="danger" disabled>Stop</button>
+        </div>
+        <div id="run-msg" class="error"></div>
+        <div class="progress"><div id="run-progress" style="width: 0%"></div></div>
+        <p class="tag" id="run-status">Idle.</p>
+
+        <p class="tag" style="margin-top:16px">
+          Note: trade and portfolio/history/holdings/leaderboard endpoints require a logged-in
+          session — open the <a href="/">Dashboard</a> in another tab to log in first. The
+          token from <code>localStorage</code> is reused here.
+        </p>
+      </div>
+
+      <div class="panel">
+        <h2>Results</h2>
+        <div class="kpi">
+          <div class="card"><div class="label">Throughput</div><div class="value" id="m-tps">—</div><div class="tag">req/s</div></div>
+          <div class="card"><div class="label">Avg Latency</div><div class="value" id="m-avg">—</div><div class="tag">ms</div></div>
+          <div class="card"><div class="label">P95 Latency</div><div class="value" id="m-p95">—</div><div class="tag">ms</div></div>
+          <div class="card"><div class="label">Error Rate</div><div class="value" id="m-err">—</div><div class="tag">%</div></div>
+        </div>
+
+        <table style="margin-top:16px">
+          <tbody>
+            <tr><td>Total requests</td><td id="m-total" style="text-align:right">—</td></tr>
+            <tr><td>Successes</td><td id="m-success" style="text-align:right">—</td></tr>
+            <tr><td>Failures</td><td id="m-fail" style="text-align:right">—</td></tr>
+            <tr><td>Wall time</td><td id="m-wall" style="text-align:right">—</td></tr>
+            <tr><td>Min latency</td><td id="m-min" style="text-align:right">—</td></tr>
+            <tr><td>P50 latency</td><td id="m-p50" style="text-align:right">—</td></tr>
+            <tr><td>P99 latency</td><td id="m-p99" style="text-align:right">—</td></tr>
+            <tr><td>Max latency</td><td id="m-max" style="text-align:right">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>Latency Distribution</h2>
+      <div class="histogram" id="hist"></div>
+      <div class="tag" id="hist-label" style="margin-top:8px">Run a test to see the distribution.</div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>Error Sample (first 10)</h2>
+      <pre id="err-sample" class="muted" style="white-space:pre-wrap; font-size:12px">—</pre>
+    </div>
+  </div>
+
+  <script src="/perf.js"></script>
+</body>
+</html>
