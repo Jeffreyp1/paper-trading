@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"trading-service/db"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"trading-service/db"
 )
 
 type Trade struct {
@@ -32,10 +32,10 @@ var (
 
 func processKafka(workerId int, db *sql.DB) error {
 	r, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": "localhost:9092",
-		"group.id":          "postgres-writer",
-		"auto.offset.reset": "earliest",
-		"enable.auto.commit": true,
+		"bootstrap.servers":  "localhost:9092",
+		"group.id":           "postgres-writer",
+		"auto.offset.reset":  "earliest",
+		"enable.auto.commit": false,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create Kafka Consumer: %v", err)
@@ -45,82 +45,59 @@ func processKafka(workerId int, db *sql.DB) error {
 		log.Fatalf("Subscription Error: %v", err)
 	}
 	var batch []Trade
+	var lastMsg *kafka.Message
 	ticker := time.NewTicker(batchTimeout)
 	defer ticker.Stop()
-	// Before the for loop:
-	seenUsers := make(map[int]bool)
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		if err := upsertBalancePositionsAndTradeHistory(db, batch); err != nil {
+			// Do NOT commit Kafka offsets on PG failure. The broker still
+			// owns these offsets, so they will be re-delivered on next poll.
+			log.Printf("❌ PG batch flush failed (worker %d): %v — dropping in-memory batch; Kafka will redeliver", workerId, err)
+			batch = nil
+			lastMsg = nil
+			return
+		}
+		if lastMsg != nil {
+			if _, cerr := r.CommitMessage(lastMsg); cerr != nil {
+				log.Printf("⚠️ CommitMessage failed (worker %d): %v", workerId, cerr)
+			}
+		}
+		batch = nil
+		lastMsg = nil
+	}
 
 	for {
 		event, err := r.ReadMessage(100 * time.Millisecond)
-		// log.Printf("✅ Kafka Message: %s", string(event))
 		if err == nil {
 			var t Trade
 			if err := json.Unmarshal(event.Value, &t); err != nil {
 				continue
 			}
-			if seenUsers[t.UserID] {
-				log.Printf("Skipping user %d (already in batch)", t.UserID)
-				continue
-			}
-			seenUsers[t.UserID] = true
 			batch = append(batch, t)
+			lastMsg = event
 
 			if len(batch) >= batchSize {
-				insertBatchToPostgres(db, batch)
-				batch = nil
-				seenUsers = make(map[int]bool)
+				flush()
 			}
 		}
 
-		// flush once per second, only if there's something
+		// flush on tick, only if there's something
 		select {
 		case <-ticker.C:
 			if len(batch) > 0 {
-				insertBatchToPostgres(db, batch)
-				batch = nil
-				seenUsers = make(map[int]bool)
+				flush()
 			}
 		default:
 			// nothing to do
 		}
 	}
-
-	// for {
-	// 	select {
-	// 	case <-ticker.C:
-	// 		if len(batch) > 0 {
-	// 			insertBatchToPostgres(db, batch)
-	// 			batch = nil
-	// 		}
-	// 	default:
-	// 		event, err := r.ReadMessage(10 * time.Millisecond)
-	// 		if err != nil {
-	// 			continue
-	// 		}
-	// 		var trade Trade
-	// 		// log.Printf("🔥 RAW Kafka payload: %s", string(event.Value))
-	// 		err = json.Unmarshal(event.Value, &trade)
-	// 		if err != nil {
-	// 			log.Println("Invalid Trade Payload", err)
-	// 			continue
-	// 		}
-
-	// 		batch = append(batch, trade)
-
-	// 		if len(batch) >= batchSize {
-	// 			err := insertBatchToPostgres(db, batch)
-	// 			if err != nil {
-	// 				log.Printf("Failed to insert Batch %v, err")
-	// 			}
-	// 			batch = nil
-	// 		}
-
-	// 	}
-
-	// }
 }
+
 func upsertBalancePositionsAndTradeHistory(db *sql.DB, trades []Trade) error {
-	fmt.Printf("Starting")
 	if len(trades) == 0 {
 		return nil
 	}
@@ -130,27 +107,90 @@ func upsertBalancePositionsAndTradeHistory(db *sql.DB, trades []Trade) error {
 	if err != nil {
 		return err
 	}
+
+	// Balance: keep the LAST (highest-offset) balance per user_id.
+	// Iterate trades in order (Kafka delivers in-order within a partition)
+	// and overwrite — final value for each user wins.
+	balanceByUser := make(map[int]float64)
+	// Preserve first-seen order for deterministic emit.
+	var balanceOrder []int
+	for _, trade := range trades {
+		if _, ok := balanceByUser[trade.UserID]; !ok {
+			balanceOrder = append(balanceOrder, trade.UserID)
+		}
+		balanceByUser[trade.UserID] = trade.Balance
+	}
+
 	var insert_trades []string
-	var positions []string
-	var args []interface{}
+	var trade_args []interface{}
 	var (
 		statement    strings.Builder
 		whereIn      []string
 		balance_args []interface{}
 	)
-	for i, trade := range trades {
+
+	// Emit one CASE branch per user using the LAST balance value.
+	for i, uid := range balanceOrder {
 		pos := i*2 + 1
 		statement.WriteString(fmt.Sprintf("When id = $%d THEN $%d ", pos, pos+1))
 		whereIn = append(whereIn, fmt.Sprintf("$%d", pos))
-		balance_args = append(balance_args, trade.UserID, trade.Balance)
+		balance_args = append(balance_args, uid, balanceByUser[uid])
+	}
+
+	// Trades table: one row per (trade, stock) — every execution is its own row.
+	for _, trade := range trades {
 		for _, stock := range trade.Stocks {
-			pos = len(args) + 1
+			pos := len(trade_args) + 1
 			insert_trades = append(insert_trades, fmt.Sprintf(" ($%d, $%d, $%d, $%d, 'BUY') ", pos, pos+1, pos+2, pos+3))
-			positions = append(positions, fmt.Sprintf("($%d, $%d, $%d, $%d)", pos, pos+1, pos+2, pos+3))
-			args = append(args, trade.UserID, stock.Symbol, stock.Quantity, stock.Price)
+			trade_args = append(trade_args, trade.UserID, stock.Symbol, stock.Quantity, stock.Price)
 		}
 	}
+
+	// Positions: pre-aggregate by (user_id, symbol) within the batch so the
+	// INSERT...ON CONFLICT statement never sees a duplicate conflict target
+	// (Postgres rejects "command cannot affect row a second time" otherwise).
+	// Quantity sums; average_price is the weighted average of all entries
+	// in this batch (same formula the ON CONFLICT clause uses to merge with
+	// the existing row).
+	type posKey struct {
+		userID int
+		symbol string
+	}
+	type posAgg struct {
+		qty    float64
+		notional float64 // sum of qty * price; divide at the end
+	}
+	agg := make(map[posKey]*posAgg)
+	var posOrder []posKey // deterministic emit order
+	for _, trade := range trades {
+		for _, stock := range trade.Stocks {
+			k := posKey{trade.UserID, stock.Symbol}
+			a, ok := agg[k]
+			if !ok {
+				a = &posAgg{}
+				agg[k] = a
+				posOrder = append(posOrder, k)
+			}
+			a.qty += stock.Quantity
+			a.notional += stock.Quantity * stock.Price
+		}
+	}
+
+	var positions []string
+	var position_args []interface{}
+	for _, k := range posOrder {
+		a := agg[k]
+		avg := 0.0
+		if a.qty > 0 {
+			avg = a.notional / a.qty
+		}
+		pos := len(position_args) + 1
+		positions = append(positions, fmt.Sprintf("($%d, $%d, $%d, $%d)", pos, pos+1, pos+2, pos+3))
+		position_args = append(position_args, k.userID, k.symbol, a.qty, avg)
+	}
+
 	if len(insert_trades) == 0 || len(positions) == 0 {
+		tx.Rollback()
 		return fmt.Errorf("no valid inserts/upserts")
 	}
 	final_trades := fmt.Sprintf(`
@@ -158,7 +198,7 @@ func upsertBalancePositionsAndTradeHistory(db *sql.DB, trades []Trade) error {
 		VALUES %s`, strings.Join(insert_trades, ", "))
 
 	insert_update_positions := fmt.Sprintf(
-		`Insert INTO positions (user_id, symbol, quantity, average_price)
+		`INSERT INTO positions (user_id, symbol, quantity, average_price)
 		VALUES %s
 		ON CONFLICT(user_id, symbol)
 		DO UPDATE SET
@@ -173,12 +213,12 @@ func upsertBalancePositionsAndTradeHistory(db *sql.DB, trades []Trade) error {
 			END
 			WHERE id IN (%s)
 		`, statement.String(), strings.Join(whereIn, ","))
-	_, err = tx.ExecContext(ctx, final_trades, args...)
+	_, err = tx.ExecContext(ctx, final_trades, trade_args...)
 	if err != nil {
 		tx.Rollback()
 		return err
 	}
-	_, err = tx.ExecContext(ctx, insert_update_positions, args...)
+	_, err = tx.ExecContext(ctx, insert_update_positions, position_args...)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -186,17 +226,17 @@ func upsertBalancePositionsAndTradeHistory(db *sql.DB, trades []Trade) error {
 	_, err = tx.ExecContext(ctx, query, balance_args...)
 	if err != nil {
 		tx.Rollback()
-		fmt.Printf("Failed to insert/update positions: %v\n", err) // Log exact failure
+		fmt.Printf("Failed to update balances: %v\n", err)
 		return err
 	}
 	err = tx.Commit()
 	if err != nil {
-		tx.Rollback()
-		log.Printf("Transaction cimmit failed: %v\n", err)
+		log.Printf("Transaction commit failed: %v\n", err)
 		return err
 	}
 	return nil
 }
+
 func insertBatchToPostgres(db *sql.DB, trades []Trade) error {
 	err := upsertBalancePositionsAndTradeHistory(db, trades)
 	if err != nil {
@@ -204,8 +244,8 @@ func insertBatchToPostgres(db *sql.DB, trades []Trade) error {
 		return err
 	}
 	return nil
-
 }
+
 func StartKafkaConsumer(workerCount int, db *sql.DB) {
 	for i := 1; i <= workerCount; i++ {
 		go func(id int) {
@@ -213,6 +253,7 @@ func StartKafkaConsumer(workerCount int, db *sql.DB) {
 		}(i)
 	}
 }
+
 func getExecutedTradeCountFromDB() int {
 	row := db.DB.QueryRow("SELECT COUNT(*) FROM trades")
 	var count int
@@ -222,80 +263,3 @@ func getExecutedTradeCountFromDB() int {
 	}
 	return count
 }
-
-
-// func updateBalances(db *sql.DB, trades []Trade) error {
-// 	if len(trades) == 0 {
-// 		return nil
-// 	}
-// 	var (
-// 		statement strings.Builder
-// 		whereIn   []string
-// 		args      []interface{}
-// 	)
-// 	for i, trade := range trades {
-// 		pos := i*2 + 1
-// 		statement.WriteString(fmt.Sprintf("When id = $%d THEN $%d ", pos, pos+1))
-// 		whereIn = append(whereIn, fmt.Sprintf("$%d", pos))
-// 		args = append(args, trade.UserID, trade.Balance)
-
-// 	}
-
-// 	query := fmt.Sprintf(`
-// 		UPDATE users
-// 		SET balance = CASE
-// 			%s
-// 			ELSE balance
-// 		END
-// 		WHERE id IN (%s)
-// 	`, statement.String(), strings.Join(whereIn, ","))
-
-// 	_, err := db.Exec(query, args...)
-// 	return err
-// }
-// func insertTradeToPostgres(ctx context.Context, db *sql.DB, trade Trade) error {
-// 	tx, err := db.BeginTx(ctx, nil)
-// 	trade.Balance
-// 	_, err := tx.ExecContext(ctx, "Update USERS SET balance = balance - $1 WHERE id = $2", totalCost, userId)
-// 	if err != nil {
-// 		return fmt.Errorf("error updating user: %w", err)
-// 	}
-// 	var trades []string
-// 	var positions []string
-// 	var args []interface{}
-// 	for _, stock := range stockData.Stock {
-// 		price, _ := redis.GetStockPrice(stock.Symbol)
-
-// 		trades = append(trades, fmt.Sprintf(" ($%d, $%d, $%d, $%d, 'BUY') ", len(args)+1, len(args)+2, len(args)+3, len(args)+4))
-// 		positions = append(positions, fmt.Sprintf("($%d, $%d, $%d, $%d)", len(args)+1, len(args)+2, len(args)+3, len(args)+4))
-// 		args = append(args, userId, stock.Symbol, stock.Quantity, price.Price)
-// 	}
-// 	if len(trades) == 0 {
-// 		return fmt.Errorf("no valid inserts")
-// 	}
-// 	if len(positions) == 0 {
-// 		return fmt.Errorf("no valid position to insert")
-// 	}
-// 	insert_trades := fmt.Sprintf(`
-// 		INSERT INTO trades (user_id, symbol, quantity, executed_price, trade_type)
-// 		VALUES %s`, strings.Join(trades, ", "))
-// 	_, err = tx.ExecContext(ctx, insert_trades, args...)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to insert trades")
-// 	}
-
-//		insert_update_positions := fmt.Sprintf(
-//			`Insert INTO positions (user_id, symbol, quantity, average_price)
-//			VALUES %s
-//			ON CONFLICT(user_id, symbol)
-//	        DO UPDATE SET
-//	            quantity = positions.quantity + EXCLUDED.quantity,
-//	            average_price = ((positions.quantity * positions.average_price) + (EXCLUDED.quantity * EXCLUDED.average_price))/ (positions.quantity + EXCLUDED.quantity),
-//	            updated_at = CURRENT_TIMESTAMP;`, strings.Join(positions, ", "))
-//		_, err = tx.ExecContext(ctx, insert_update_positions, args...)
-//		if err != nil {
-//			fmt.Printf("Failed to insert/update positions: %v\n", err) // Log exact failure
-//			return fmt.Errorf("Failed to insert/update positions: %v", err)
-//		}
-//		return nil
-//	}

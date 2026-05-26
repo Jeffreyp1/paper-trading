@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"time"
+
 	redis "github.com/redis/go-redis/v9"
 	redisClient "trading-service/pkg/redisClient"
 
@@ -26,36 +28,78 @@ var producer *kafka.Producer
 func initKafkaProducer() {
 	var err error
 	producer, err = kafka.NewProducer(&kafka.ConfigMap{
-		"bootstrap.servers": "localhost:9092", // update if needed
-		"queue.buffering.max.messages": 8000000, // default is 100000
-		"queue.buffering.max.kbytes": 8048576,   // 1GB
+		"bootstrap.servers":            "localhost:9092",
+		"queue.buffering.max.messages": 8000000,
+		"queue.buffering.max.kbytes":   8048576,
+		// S-tier #5: let librdkafka batch + compress on the wire.
+		"linger.ms":        10,
+		"batch.size":       1048576,
+		"compression.type": "snappy",
+		"acks":             "all",
+		"enable.idempotence": true,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create Kafka producer: %v", err)
 	}
+
+	// Drain delivery reports in a single goroutine: ack Redis Stream ONLY after
+	// the broker confirms the message landed. Closes the prior data-loss window
+	// where XAck+XDel happened immediately after a non-blocking Produce.
+	go func() {
+		for e := range producer.Events() {
+			m, ok := e.(*kafka.Message)
+			if !ok {
+				continue
+			}
+			meta, _ := m.Opaque.(*deliveryMeta)
+			if meta == nil {
+				continue
+			}
+			if m.TopicPartition.Error != nil {
+				log.Printf("kafka delivery err for redis msg %s: %v", meta.jobID, m.TopicPartition.Error)
+				// Do NOT ack; the stream replay will retry on next restart.
+				continue
+			}
+			ctx := context.Background()
+			if _, err := redisClient.Client.XAck(ctx, "buy_stream", "kafka_workers", meta.jobID).Result(); err != nil {
+				log.Printf("redis xack err for %s: %v", meta.jobID, err)
+				continue
+			}
+			redisClient.Client.XDel(ctx, "buy_stream", meta.jobID)
+		}
+	}()
 }
+
+// deliveryMeta is attached to each Kafka produce request so the delivery-report
+// callback can find the originating Redis Stream message ID to ack.
+type deliveryMeta struct {
+	jobID string
+}
+
 func processRedisStream(workerId int) error {
-	if producer == nil{
+	if producer == nil {
 		log.Fatal("kafka producer is NIL ")
 	}
 	for {
-		// log.Printf("📥 Worker %d attempting to read from `buy_stream`...", workerId)
+		// S-tier #3: Block up to 5s on empty stream instead of hot-looping.
 		messages, err := redisClient.Client.XReadGroup(context.Background(), &redis.XReadGroupArgs{
 			Group:    "kafka_workers",
 			Consumer: fmt.Sprintf("redisConsumer-%d", workerId),
 			Streams:  []string{"buy_stream", ">"},
-			Count:    10,
+			Count:    100,
+			Block:    5 * time.Second,
 		}).Result()
-		// log.Printf("reading message now!")
 		if err != nil {
-			log.Println("Error reading from Redis Stream: ", err)
-			break
-		} else {
-			if len(messages) == 0 || len(messages[0].Messages) == 0 {
-				log.Printf("⚠️ Worker %d found no messages", workerId)
+			if err == redis.Nil { // timeout, no messages — normal idle case
 				continue
 			}
+			log.Println("Error reading from Redis Stream: ", err)
+			continue
 		}
+		if len(messages) == 0 || len(messages[0].Messages) == 0 {
+			continue
+		}
+
 		for _, message := range messages[0].Messages {
 			jobID := message.ID
 			values := message.Values
@@ -86,37 +130,33 @@ func processRedisStream(workerId int) error {
 				log.Printf("❌ Failed to marshal tradePayload: %v", err)
 				continue
 			}
+			// Pattern 1a: shard by user_id. librdkafka's default partitioner
+			// hashes Key -> partition, so all trades for the same user always
+			// land on the same partition, consumed by the same SQL writer.
+			// No two writers ever see the same user => no cross-consumer
+			// row contention => no deadlocks.
+			//
+			// S-tier #4: Opaque carries the Redis Stream jobID so the
+			// delivery-report goroutine can XAck only after Kafka confirms.
 			err = producer.Produce(&kafka.Message{
 				TopicPartition: kafka.TopicPartition{Topic: ptr("trade_events"), Partition: kafka.PartitionAny},
+				Key:            []byte(strconv.Itoa(userID)),
 				Value:          jsonPayload,
+				Opaque:         &deliveryMeta{jobID: jobID},
 			}, nil)
 			if err != nil {
 				log.Printf("Kafka publish error %v", err)
+				// Do NOT ack; the message stays in the pending list and will retry.
 			}
-			_, err = redisClient.Client.XAck(context.Background(), "buy_stream", "kafka_workers", jobID).Result()
-			_, _ = redisClient.Client.XDel(context.Background(), "buy_stream", jobID).Result()
-			// if err != nil {
-			// 	log.Println("Error acknowledging job: ", err)
-			// } else {
-			// 	_, trimErr := redisClient.Client.XDel(context.Background(), "buy_stream", jobID).Result()
-			// 	if trimErr != nil {
-			// 		log.Println("Error trimming Redis stream:", trimErr)
-			// 	}else{
-			// 		log.Println("Successfully trimmed!")
-			// 	}
-			// }
 		}
 	}
-	return nil
 }
 
 func StartKafkaProducer(workerCount int) {
 	initKafkaProducer()
 	for i := 1; i <= workerCount; i++ {
 		go processRedisStream(i)
-
 	}
-
 }
 func ptr(s string) *string {
 	return &s

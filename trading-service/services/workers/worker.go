@@ -28,25 +28,27 @@ func TradeWorker(id int, jobs <-chan TradeJob, wg *sync.WaitGroup) {
 		balanceStr, err := redisClient.Client.HGet(ctx, "user_balance", fmt.Sprint(tradeData.UserID)).Result()
 		balance, err := strconv.ParseFloat(balanceStr, 64)
 		if err != nil {
-			log.Printf("User not found or balance", http.StatusBadRequest)
+			log.Printf("User not found or balance: %d", http.StatusBadRequest)
 		}
 		var totalCost float64
 		for i, stock := range tradeData.Stock {
 			stockPrice, err := redisStorage.GetStockPrice(stock.Symbol)
 			if err != nil {
-				log.Printf("Failed to fetch price", err)
+				log.Printf("Failed to fetch price: %v", err)
 			} else {
 				tradeData.Stock[i].Price = stockPrice
 			}
 			totalCost += stockPrice * stock.Quantity
 		}
 		if totalCost <= balance {
-			trade_service.ExecuteBuy(ctx, tradeData, balance, totalCost)
-		} else {
-			log.Print(totalCost, balance, tradeData.UserID)
-			log.Printf("Insufficient funds",  http.StatusForbidden)
-			continue
-		}
+			if err := trade_service.ExecuteBuy(ctx, tradeData, balance, totalCost); err != nil {
+				log.Printf("ExecuteBuy failed (user %d): %v", tradeData.UserID, err)
+			}
+			} else {
+				log.Print(totalCost, balance, tradeData.UserID)
+				log.Printf("Insufficient funds: %d", http.StatusForbidden)
+				continue
+			}
 	}
 }
 

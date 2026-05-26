@@ -173,7 +173,9 @@ func main() {
     redisStorage.InitRedis(redisClient.Client)
 	oldTrades := getExecutedTradeCountFromDB()
     workers.EnsureRedisStream()
-    workers.StartKafkaProducer(2)
+    // S-tier #1: producer pool 2 -> 16 to match the worker pool that XADDs onto buy_stream.
+    // Prior 2-producer config caused buy_stream to back up to 2.18M msgs in a 5-min run.
+    workers.StartKafkaProducer(16)
     workers.StartKafkaConsumer(15, db.DB)
 
     // go workers.StartWorkerPool(workerCount, workers.TradeJobQueue)
