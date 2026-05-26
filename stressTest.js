@@ -1,162 +1,94 @@
-// tradeLoadTest.js
+// Load test for POST /api/v1/trading/trade.
+// Registers + logs in a bench user once, then drives N concurrent BUY requests
+// for a fixed duration, records latency into an HDR histogram, prints
+// sustained TPS + p50/p95/p99 + hardware info.
+//
+// Env vars:
+//   TEST_DURATION_MS   default 30000
+//   BATCH_SIZE         default 200 (concurrent in-flight requests)
+//   API_BASE           default http://localhost:3000
+//   BENCH_USER         default "bench" (will be registered if needed)
+//   BENCH_PW           default "benchpw"
+
 import axios from "axios";
 import { performance } from "perf_hooks";
+import os from "os";
+import * as hdr from "hdr-histogram-js";
 
-// ─── Config ─────────────────────────────────────────────────────────
-const API_URL          = "http://localhost:3000/api/v1/trading/trade";
-const TEST_DURATION_MS = 1000;            // run for 5 s
-const MAX_USERS        = 10_000;          // user ids 1-10 000
-const BATCH_SIZE       = 200;             // concurrent requests per tick
+const API_BASE         = process.env.API_BASE || "http://localhost:3000";
+const TEST_DURATION_MS = Number(process.env.TEST_DURATION_MS) || 30_000;
+const BATCH_SIZE       = Number(process.env.BATCH_SIZE) || 200;
+const USER             = process.env.BENCH_USER || "bench";
+const PW               = process.env.BENCH_PW || "benchpw";
 const STOCKS           = ["AAPL","MSFT","AMZN","GOOGL","META"];
 
-// ─── Metrics ────────────────────────────────────────────────────────
-let sent = 0;
-let success = 0;
-let fail = 0;
-let totalLatency = 0;
+const histogram = hdr.build({ lowestDiscernibleValue: 1, highestTrackableValue: 60_000_000, numberOfSignificantValueDigits: 3 });
 
-// ─── Helpers ────────────────────────────────────────────────────────
-const rand  = arr => arr[Math.floor(Math.random()*arr.length)];
-const delay = ms  => new Promise(r => setTimeout(r, ms));
+let sent = 0, success = 0, fail = 0, sampleErr = null;
+const rand = arr => arr[Math.floor(Math.random()*arr.length)];
 
-const genTrade = (uid) => ({
-  userId : uid,
-  action : "BUY",
-  stock  : [{
-    symbol   : rand(STOCKS),
-    quantity : Math.floor(Math.random()*5)+1,
-    price    : 0,
-  }],
+const genTrade = () => ({
+  action: "BUY",
+  stock: [{ symbol: rand(STOCKS), quantity: Math.floor(Math.random()*5)+1, price: 0 }],
 });
 
-const postTrade = async (data) => {
+const ensureBearer = async () => {
+  // try login first
+  try {
+    const r = await axios.post(`${API_BASE}/api/v1/auth/login`, { email: `${USER}@bench.io`, password: PW });
+    return r.data.token;
+  } catch {}
+  // else register, then login
+  await axios.post(`${API_BASE}/api/v1/auth/register`, { username: USER, email: `${USER}@bench.io`, password: PW }).catch(() => {});
+  const r = await axios.post(`${API_BASE}/api/v1/auth/login`, { email: `${USER}@bench.io`, password: PW });
+  return r.data.token;
+};
+
+const postTrade = async (axiosInstance) => {
   const t0 = performance.now();
   try {
-    await axios.post(API_URL, data);
-    const t1 = performance.now();
+    await axiosInstance.post(`/api/v1/trading/trade`, genTrade());
+    histogram.recordValue(Math.max(1, Math.round((performance.now() - t0) * 1000))); // µs
     success++;
-    totalLatency += (t1 - t0);
-  } catch (err) {
+  } catch (e) {
     fail++;
+    if (!sampleErr) sampleErr = `${e.response?.status || ""} ${JSON.stringify(e.response?.data || e.message).slice(0,200)}`;
   }
 };
 
-// ─── Main load test loop ────────────────────────────────────────────
 const runTest = async () => {
-  console.log("🚀 5-second load test started…");
+  console.log(`🚀 load test: ${TEST_DURATION_MS}ms, batch=${BATCH_SIZE}, base=${API_BASE}`);
+  const token = await ensureBearer();
+  console.log(`🔑 token acquired (${token.length} chars)`);
+  const ax = axios.create({ baseURL: API_BASE, timeout: 10000, headers: { Authorization: `Bearer ${token}` } });
+
   const start  = Date.now();
   const stopAt = start + TEST_DURATION_MS;
-  const users  = Array.from({length: MAX_USERS}, (_,i)=> i+1);
-
   while (Date.now() < stopAt) {
     const batch = [];
-    for (let i = 0; i < BATCH_SIZE; i++) {
-      const uid = rand(users);
-      batch.push(postTrade(genTrade(uid)));
-      sent++;
-    }
-    await Promise.all(batch);            // wait for batch to finish
+    for (let i = 0; i < BATCH_SIZE; i++) { batch.push(postTrade(ax)); sent++; }
+    await Promise.all(batch);
   }
 
-  // ─── Report ──────────────────────────────────────────────────────
-  const durSec     = (Date.now() - start)/1000;
-  const tps        = (success / durSec).toFixed(1);
-  const avgLatency = success ? (totalLatency / success).toFixed(2) : "n/a";
+  const durSec = (Date.now() - start)/1000;
+  const tps    = (success / durSec).toFixed(1);
+  const p = us => (us/1000).toFixed(2);
 
   console.log("================================================");
-  console.log(`🟢 Sent requests      : ${sent}`);
-  console.log(`✅ Successful trades  : ${success}`);
-  console.log(`❌ Failed trades      : ${fail}`);
-  console.log(`📊 TPS (success only) : ${tps}`);
-  console.log(`⏱️ Avg latency (ms)   : ${avgLatency}`);
+  console.log(`hardware           : ${os.platform()} ${os.arch()} / ${os.cpus()[0].model} x${os.cpus().length} / ${Math.round(os.totalmem()/1e9)}GB`);
+  console.log(`node               : ${process.version}`);
+  console.log(`duration (s)       : ${durSec.toFixed(2)}`);
+  console.log(`sent               : ${sent}`);
+  console.log(`ok                 : ${success}`);
+  console.log(`err                : ${fail}`);
+  if (sampleErr) console.log(`first err          : ${sampleErr}`);
+  console.log(`TPS (ok/s)         : ${tps}`);
+  console.log(`latency p50 (ms)   : ${p(histogram.getValueAtPercentile(50))}`);
+  console.log(`latency p95 (ms)   : ${p(histogram.getValueAtPercentile(95))}`);
+  console.log(`latency p99 (ms)   : ${p(histogram.getValueAtPercentile(99))}`);
+  console.log(`latency p99.9 (ms) : ${p(histogram.getValueAtPercentile(99.9))}`);
+  console.log(`latency max  (ms)  : ${p(histogram.maxValue)}`);
   console.log("================================================");
 };
 
-runTest();
-
-
-
-// import axios from "axios";
-// import 'dotenv/config';
-
-// // API Config
-// const API_URL = "http://localhost:3000/api/v1/trading/trade";
-// const NUM_USERS = 10000;  // Users 5 - 10000
-// const TRADES_PER_USER = 1;
-// const TOTAL_TRADES = NUM_USERS * TRADES_PER_USER;
-// const BATCH_SIZE = 100;  // Process 100 trades at a time
-// const MAX_RETRIES = 3;  // Retry failed trades up to 3 times
-
-// // Stock Symbols (Keep it the same)
-// const STOCK_SYMBOLS = [
-//     "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "JNJ", "V", "PG"
-// ];
-
-// // ✅ Generate Trade Data
-// const generateTradeData = (userId) => ({
-//     action: "BUY",
-//     stock: [
-//         {
-//             symbol: STOCK_SYMBOLS[Math.floor(Math.random() * STOCK_SYMBOLS.length)],
-//             quantity: Math.floor(Math.random() * 5) + 1, // 🔁 Random quantity between 1–5
-//             price: 0, // 🧮 Fixed price like Go
-//         }
-//     ],
-//     userId: userId
-// });
-
-// // ✅ Execute a Single Trade
-// const executeTrade = async (userId, attempt = 1) => {
-//     const tradeData = generateTradeData(userId);
-    
-//     try {
-//         const response = await axios.post(API_URL, tradeData);
-//         console.log(`✅ Trade (User ${userId}) completed in ${response?.data?.time}ms`);
-//     } catch (error) {
-//         // Capture Detailed Error Logs
-//         const errorMessage = error.response?.data?.error || error.message;
-//         const statusCode = error.response?.status || "No Status";
-//         const responseData = error.response?.data || "No Response Data";
-        
-//         console.error(`❌ Trade Failed (User ${userId}, Attempt ${attempt})`);
-//         console.error(`   → Status Code: ${statusCode}`);
-//         console.error(`   → Error Message: ${errorMessage}`);
-//         console.error(`   → Response Data:`, responseData);
-        
-//         // Retry failed trades up to MAX_RETRIES
-//         if (attempt < MAX_RETRIES) {
-//             await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms before retrying
-//             return executeTrade(userId, attempt + 1);
-//         }
-//     }
-// };
-
-
-// // ✅ Execute Trades with Controlled Speed
-// const executeTrades = async () => {
-//     console.log(`📡 Starting stress test: ${NUM_USERS} users x ${TRADES_PER_USER} trades...`);
-//     const start = Date.now();
-    
-//     let tradeQueue = [];
-
-//     for (let i = 5; i <= NUM_USERS; i++) {
-//         for (let j = 0; j < TRADES_PER_USER; j++) {
-//             tradeQueue.push(() => executeTrade(i));
-//         }
-//     }
-
-//     // ✅ Process trades in batches with a delay
-//     for (let i = 0; i < tradeQueue.length; i += BATCH_SIZE) {
-//         const batch = tradeQueue.slice(i, i + BATCH_SIZE);
-//         await Promise.all(batch.map(trade => trade()));
-
-//         console.log(`🚀 Processed batch ${i / BATCH_SIZE + 1}/${Math.ceil(tradeQueue.length / BATCH_SIZE)}`);
-//         // await new Promise(resolve => setTimeout(resolve, Math.random() * 20 + 5)); // Random delay (5-20ms) 
-//     }
-
-//     const end = Date.now();
-//     console.log(`✅ Successfully processed ${TOTAL_TRADES} trades in ${end - start}ms.`);
-// };
-
-// // Run Stress Test
-// executeTrades();
+runTest().catch(err => { console.error("FATAL:", err.message); process.exit(1); });

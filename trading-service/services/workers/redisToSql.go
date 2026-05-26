@@ -122,25 +122,25 @@ func processTrade(workerId int, db *sql.DB) {
 				log.Println("Missing or invalid user_id", values)
 				continue
 			}
-			userId, err := strconv.Atoi(tempUserId)
-			if err != nil {
-				log.Printf("Error converting user_id", values)
-			}
-			action, ok := values["action"].(string)
-			if !ok {
-				log.Printf("Missing or invalid action", values)
-				continue
-			}
-			balanceStr, ok := values["balance"].(string)
-			if !ok {
-				log.Printf("Missing or invalid balance", values)
-				continue
-			}
-			balance, err := strconv.ParseFloat(balanceStr, 64)
-			if err != nil {
-				log.Printf("Failed to convert balance to float", values)
-				continue
-			}
+				userId, err := strconv.Atoi(tempUserId)
+				if err != nil {
+					log.Printf("Error converting user_id: %v", values)
+				}
+				action, ok := values["action"].(string)
+				if !ok {
+					log.Printf("Missing or invalid action: %v", values)
+					continue
+				}
+				balanceStr, ok := values["balance"].(string)
+				if !ok {
+					log.Printf("Missing or invalid balance: %v", values)
+					continue
+				}
+				balance, err := strconv.ParseFloat(balanceStr, 64)
+				if err != nil {
+					log.Printf("Failed to convert balance to float: %v", values)
+					continue
+				}
 			stockData, ok := values["stocks"].(string)
 			if !ok {
 				log.Printf("Failed to retrieve list of stocks")

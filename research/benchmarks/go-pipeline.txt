@@ -1,0 +1,17 @@
+=== Go async pipeline self-load-test (300s) ===
+Hardware: darwin arm64 / Apple M4 x10 / 17GB
+Stack: HTTP :8081 -> bounded channel(10000) -> 30 workers -> Redis Streams (consumer group kafka_workers) -> Kafka producer pool (2) -> Kafka topic trade_events -> Kafka consumer pool (15, group postgres-writer) -> batched Postgres upserts (2000-row batches or 50ms timeout)
+
+Final stats from main.go self-load-test (5-minute internal driver):
+  Total Trades Sent (HTTP):        3,932,836
+  Total Stocks Traded:            11,797,312
+  HTTP ingest TPS:                    13,109/s
+  Trades persisted to Postgres:      685,562  (delta: 716,182 - 30,620 baseline)
+  Persisted TPS:                       2,285/s
+  Persist/Send ratio:                    17.4%
+
+Notes:
+  - Sent rate is HTTP enqueue throughput (server accepts request, places onto in-memory channel, returns).
+  - Persist rate is the actual end-to-end pipeline throughput: each trade traverses HTTP -> channel -> worker -> Redis Stream -> Kafka producer -> Kafka topic -> Kafka consumer -> 2000-row batched Postgres tx.
+  - Drop reasons (visible in worker.go logs): mostly Insufficient funds rejections (random users hit by random trade sizes >$10k starting balance). Pure pipeline throughput (no rejections) would be higher; current persisted TPS reflects the realistic correct-rejection rate.
+  - Kafka consumer group lag at end: 55 messages (negligible).

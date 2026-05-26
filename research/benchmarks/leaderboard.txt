@@ -1,0 +1,29 @@
+=== Leaderboard rebuild (current data) ===
+Hardware: darwin arm64 / Apple M4 x10 / 17GB
+PG: paper-trading-postgres-1 (postgres:16, docker, host :5433)
+Redis: paper-trading-redis-1 (redis:7, docker, host :6380)
+
+Data shape at measurement:
+  users:     10,003
+  positions: 49,996 (≈5 symbols per user across the 99-stock universe)
+  trades:    716,385 (after Go pipeline 5-min self-load-test)
+  prices:    99 (in stockPrices Redis hash)
+
+Replicates the live updateLeaderboard() in index.js:
+  - INNER JOIN users + positions
+  - HGETALL stockPrices (parallel)
+  - Per-user net_worth = balance + sum(qty * price)
+  - DEL leaderboard + pipelined ZADD per user
+
+Raw output:
+  JOIN+HGETALL rows: 49996, prices: 99, time: 74ms
+  map build: 9ms (users in map: 10003)
+  ZADD: 78ms
+  TOTAL: 161ms
+
+Notes:
+  - The 49,996-position figure is the live data after a 5-min Go pipeline
+    self-load-test (~10k users × ~5 distinct symbols traded each).
+  - The leaderboard query scales primarily with positions, not trades; the
+    716k trade rows in the table don't affect rebuild time.
+  - No index on positions(user_id) yet — hash join on sequential scan.

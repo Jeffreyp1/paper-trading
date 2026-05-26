@@ -1,0 +1,10 @@
+node_modules
+web
+ai-service
+trading-service
+.git
+.env
+*.log
+dump.rdb
+design
+research

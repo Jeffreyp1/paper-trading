@@ -1,0 +1,36 @@
+=== Node sync trade path (30s) ===
+Hardware: darwin arm64 / Apple M4 x10 / 17GB
+Node: v20.20.2
+URL: POST http://localhost:3000/api/v1/trading/trade
+PG: paper-trading-postgres-1 (postgres:16, docker, host :5433)
+Redis: paper-trading-redis-1 (redis:7, docker, host :6380)
+
+Setup:
+  - One bench user (id 10003) with $9,999,999,999.99 balance (avoids
+    "Insufficient funds" rejections, keeps the test "hot row" for FOR UPDATE).
+  - Random BUY of 1-5 shares of random symbol from {AAPL,MSFT,AMZN,GOOGL,META}
+  - BATCH_SIZE=200 (concurrent in-flight requests)
+  - All requests authenticated via JWT (post-fix: auth is enforced).
+
+Raw output:
+  duration (s)       : 30.28
+  sent               : 30600
+  ok                 : 30600
+  err                : 0
+  TPS (ok/s)         : 1010.5
+  latency p50 (ms)   : 96.32
+  latency p95 (ms)   : 240.00
+  latency p99 (ms)   : 450.56
+  latency p99.9 (ms) : 750.59
+  latency max  (ms)  : 803.85
+
+Notes:
+  - 100% success rate; balance check, parameterized SQL, FOR UPDATE all in
+    effect. No SQL errors, no failed trades.
+  - Single-user hot-row scenario: every trade contends for SELECT FOR UPDATE
+    on users(id=10003). Multi-user distribution would yield higher TPS
+    (no row contention).
+  - Per-request path: JWT verify -> pg pool acquire -> BEGIN -> SELECT...
+    FOR UPDATE on user balance -> HMGET stockPrices -> compute total ->
+    insufficient-funds check -> UPDATE balance -> multi-row INSERT trades
+    -> ON CONFLICT DO UPDATE positions -> COMMIT -> release -> response.
