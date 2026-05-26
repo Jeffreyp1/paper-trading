@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS trades (
         ON DELETE CASCADE
 );
 
+CREATE INDEX IF NOT EXISTS idx_trades_user_id_created_at ON trades(user_id, created_at DESC);
+
 -- ==============================
 -- 4) Positions Table (User’s Current Holdings)
 -- ==============================
