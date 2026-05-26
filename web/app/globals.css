@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body {
+  background: #0A0D12;
+  color: #FFFFFF;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" on, "lnum" on;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.hatched {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(255,255,255,0.06) 0px,
+    rgba(255,255,255,0.06) 2px,
+    transparent 2px,
+    transparent 6px
+  );
+}
