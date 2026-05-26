@@ -1,2 +1,7 @@
 .env
 test.js
+node_modules/
+web/node_modules/
+web/.next/
+trading-service/trading-service
+.cache/
